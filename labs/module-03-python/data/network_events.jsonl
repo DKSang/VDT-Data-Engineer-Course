@@ -1,0 +1,12 @@
+{"event_id":"e-001","version":1,"cell_id":" hn-01 ","customer_id":1001,"event_time":"2026-08-10T12:00:00+07:00","ingested_at":"2026-08-10T12:00:05+07:00","duration_ms":1200,"dropped":false}
+{"event_id":"e-002","version":1,"cell_id":"HN-01","customer_id":1002,"event_time":"2026-08-10T12:00:10+07:00","ingested_at":"2026-08-10T12:00:12+07:00","duration_ms":800,"dropped":"true"}
+{"event_id":"e-003","version":1,"cell_id":" hcm-02","customer_id":1003,"event_time":"2026-08-10T12:00:20+07:00","ingested_at":"2026-08-10T12:00:21+07:00","duration_ms":1600,"dropped":false}
+{"event_id":"e-004","version":1,"cell_id":"DN-01","customer_id":1004,"event_time":"2026-08-10T12:00:30+07:00","ingested_at":"2026-08-10T12:00:31+07:00","duration_ms":-50,"dropped":false}
+{"event_id":"e-005","version":1,"cell_id":"HP-01","customer_id":1005,"event_time":"2026-08-10T12:00:40+07:00","ingested_at":"2026-08-10T12:00:41+07:00","duration_ms":500,"dropped":"FALSE"}
+{"event_id":"e-002","version":2,"cell_id":"HN-01","customer_id":1002,"event_time":"2026-08-10T12:00:10+07:00","ingested_at":"2026-08-10T12:05:00+07:00","duration_ms":900,"dropped":false}
+{"event_id":"e-006","version":1,"cell_id":"HN-02","customer_id":1001,"event_time":"2026-08-10T11:50:00+07:00","ingested_at":"2026-08-10T12:10:00+07:00","duration_ms":300,"dropped":true}
+{"event_id":"e-007","version":1,"cell_id":"","customer_id":1003,"event_time":"2026-08-10T12:01:00+07:00","ingested_at":"2026-08-10T12:01:01+07:00","duration_ms":700,"dropped":false}
+{"event_id":"e-008","version":1,"cell_id":"HCM-02","customer_id":1002,"event_time":"2026-08-10T12:02:00","ingested_at":"2026-08-10T12:02:01+07:00","duration_ms":400,"dropped":false}
+{"event_id":"e-009","version":1,"cell_id":"HCM-02","customer_id":1003,"event_time":"2026-08-10T12:03:00+07:00","ingested_at":"2026-08-10T12:03:01+07:00","duration_ms":"abc","dropped":false}
+{"event_id":"e-010","version":1,"cell_id":"DN-01","customer_id":1003,"event_time":"2026-08-10T12:04:00+07:00","ingested_at":"2026-08-10T12:04:01+07:00","duration_ms":1000,"dropped":"yes"}
+{"event_id":"e-011","version":1,"cell_id":"HN-01","customer_id":1001,"event_time":"2026-08-10T12:05:00Z","ingested_at":"2026-08-10T12:05:02Z","duration_ms":1100,"dropped":false}

@@ -55,7 +55,7 @@ Tên sản phẩm/feature trong lesson phải ưu tiên terminology hiện hành
 | 03 | Python for Data Engineers | ✅ Complete – Databricks Academy Python backbone |
 | 04 | DSA for Data Engineer Interviews | ⏭ Skipped / Optional draft |
 | 05 | Database Fundamentals | ✅ Complete – PostgreSQL fundamentals + Databricks/Delta contrast |
-| 06 | Data Warehouse & Dimensional Modeling | ⏳ Planned |
+| 06 | Data Warehouse & Dimensional Modeling | ✅ Complete – Databricks warehouse + dimensional marts |
 | 07 | Linux, Git & Docker | ⏳ Planned |
 | 08 | Distributed Systems & Hadoop | ⏳ Planned |
 | 09 | Apache Spark & PySpark | ⏳ Planned |
@@ -146,6 +146,26 @@ Primary RDBMS lab uses PostgreSQL 18 because the module needs observable databas
 
 ➡️ [`docs/module-05-database-fundamentals`](docs/module-05-database-fundamentals/README.md)
 
+### Module 06 – Data Warehouse & Dimensional Modeling
+
+**Primary environment:** Databricks SQL / Databricks Runtime + Delta tables.
+
+Databricks official data-warehousing/modeling guidance is the backbone: Silver can host integrated detailed warehouse structures, while Gold commonly hosts business-facing dimensional marts and aggregates.
+
+- Warehouse layers, business process & grain-first modeling
+- Transaction, periodic snapshot and accumulating snapshot fact tables
+- Additive, semi-additive and non-additive measures
+- Dimensions, natural keys, surrogate keys, role-playing/degenerate/unknown members
+- Star vs snowflake schema design workflow
+- SCD Type 1/2, point-in-time mapping and late-arriving dimensions
+- Conformed dimensions, bus matrix, bridge awareness and cross-fact grain alignment
+- Databricks incremental dimension/fact loading with `MERGE` + AUTO CDC awareness
+- Silver integrated warehouse → Gold Finance/Network dimensional marts
+- Databricks Delta telecom warehouse lab + 50-question practice set
+- Final Assessment 100 points + Suggested Solutions
+
+➡️ [`docs/module-06-data-warehouse-dimensional-modeling`](docs/module-06-data-warehouse-dimensional-modeling/README.md)
+
 ## Case study xuyên suốt
 
 Khóa học sử dụng một **Telecom Data Platform giả lập** để nối các module thành một hệ thống duy nhất:
@@ -179,6 +199,8 @@ Module 02 dùng cùng telecom domain trên **Delta tables** để luyện SQL se
 Module 03 đưa cùng domain sang Python local/bounded processing với dirty CSV/JSONL, explicit data contracts, quarantine, deterministic dedup, unit testing và Databricks development mapping. Mục tiêu là chứng minh business semantics trước khi scale bằng Spark.
 
 Module 05 quay lại **operational database layer** để hiểu nguồn dữ liệu thực sự hoạt động ra sao: transaction boundary, isolation, integrity, index/planner và cách các guarantees đó thay đổi khi dữ liệu được đưa vào Delta/lakehouse.
+
+Module 06 chuyển dữ liệu Silver đã trusted/integrated thành **Gold dimensional marts**: billing transaction fact, customer/plan/date dimensions, network daily fact, SCD2 customer history, conformed dimensions, bus matrix và incremental Gold loading.
 
 ## Cách học
 

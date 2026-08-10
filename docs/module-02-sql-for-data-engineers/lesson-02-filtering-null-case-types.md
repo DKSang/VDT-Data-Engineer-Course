@@ -1,159 +1,247 @@
-# Lesson 02 – Filtering, NULL, CASE & Data Types
+# Lesson 02 – Filtering, NULL, CASE & Databricks Data Types
 
 ## 1. Learning objectives
 
 Sau bài này, bạn phải có thể:
 
-- Viết filter đúng với timestamp, text, numeric và NULL.
-- Giải thích SQL three-valued logic: `TRUE`, `FALSE`, `UNKNOWN`.
-- Phân biệt `= NULL` và `IS NULL`.
-- Dùng `CASE`, `COALESCE`, `NULLIF` để biểu diễn business rules rõ ràng.
-- Tránh implicit cast và type mismatch gây bug/cost.
-- Viết date range theo half-open interval.
-- Nhận diện predicate có thể làm mất row ngoài ý muốn sau `LEFT JOIN`.
+- Reasoning đúng với `NULL` và three-valued logic.
+- Viết filter thời gian theo boundary rõ ràng.
+- Dùng `CASE`, `COALESCE`, `NULLIF` đúng business semantics.
+- Phân biệt implicit type resolution với explicit cast.
+- Biết khi nào dùng `CAST` và khi nào dùng Databricks `try_cast`.
+- Hiểu Databricks type promotion / least-common-type ở mức thực dụng.
+- Giữ đúng row-preservation intent khi filter sau `LEFT JOIN`.
 
 ---
 
-## 2. Principles
+## 2. Source alignment
 
-### Principle 1 – NULL means unknown/missing, not zero or empty string
+### Primary Databricks sources
 
-`NULL` không phải `0`, không phải `''`, không phải `'unknown'`. Nó biểu diễn absence/unknown ở tầng SQL.
+- SQL Language Reference – NULL semantics / data types  
+  https://docs.databricks.com/aws/en/sql/language-manual
+- SQL data type rules  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-datatype-rules
+- `CAST` / `try_cast`  
+  https://docs.databricks.com/aws/en/sql/language-manual/functions/cast  
+  https://docs.databricks.com/aws/en/sql/language-manual/functions/try_cast
+- `IS NULL`  
+  https://docs.databricks.com/aws/en/sql/language-manual/functions/isnullop
+- Null-safe comparison `equal_null` / `<=>`  
+  https://docs.databricks.com/aws/en/sql/language-manual/functions/equal_null
 
-Nếu business muốn phân biệt “không có dữ liệu”, “không áp dụng”, “0 thật”, schema và transformation phải thể hiện rõ.
+### Scope note
 
-### Principle 2 – Filters encode business semantics
-
-`WHERE status = 'success'` không chỉ là syntax. Nó là một quyết định nghiệp vụ: refunded/failed/pending có được tính doanh thu không?
-
-Mọi filter quan trọng nên có business definition đi kèm.
-
-### Principle 3 – Prefer explicit boundaries and types
-
-Timestamp filtering nên rõ inclusive/exclusive. Type conversion nên có chủ đích. Query càng “magic” nhờ implicit behavior càng khó debug khi chuyển engine.
-
-### Principle 4 – Preserve outer-join intent
-
-Một `LEFT JOIN` có thể vô tình biến thành inner-like behavior nếu bạn filter column phía right trong `WHERE` mà không xử lý NULL.
+Databricks có ANSI/type-coercion behavior phụ thuộc context/configuration. Course không khuyến khích dựa vào implicit conversion “tình cờ chạy được”; production transformations nên làm type intent explicit.
 
 ---
 
-## 3. Fundamentals
+## 3. Principles
 
-### 3.1 Three-valued logic
-
-Trong SQL, boolean expression có thể là:
+### Principle 1 – NULL is absence/unknown, not zero
 
 ```text
-TRUE
-FALSE
-UNKNOWN
+NULL != 0
+NULL != ''
+NULL != false
 ```
 
-Ví dụ:
+Nếu business cần phân biệt:
+
+```text
+unknown
+not applicable
+known zero
+```
+
+schema/transformation phải giữ được khác biệt đó.
+
+### Principle 2 – WHERE keeps TRUE
+
+Comparison với `NULL` thường không tạo `TRUE`/`FALSE` mà tạo `UNKNOWN`.
+
+`WHERE` chỉ giữ rows có predicate `TRUE`.
+
+### Principle 3 – Cast policy is part of data-quality policy
+
+Hai chiến lược khác nhau:
+
+```text
+invalid value must stop pipeline → CAST / fail fast
+invalid value should be quarantined → try_cast → NULL + quality check
+```
+
+`try_cast` không “fix data”; nó cho phép pipeline biểu diễn parse failure thành `NULL` để xử lý có chủ đích.
+
+### Principle 4 – Prefer explicit time boundaries
+
+Pipeline theo ngày/giờ nên dùng interval kiểu:
+
+```text
+[start, end)
+```
+
+để các batches nối nhau không overlap và không phụ thuộc timestamp precision cuối ngày.
+
+### Principle 5 – Preserve outer-join intent
+
+Predicate ở `WHERE` trên right side của `LEFT JOIN` có thể loại unmatched rows. Predicate placement là semantics, không chỉ style.
+
+---
+
+## 4. Fundamentals
+
+### 4.1 Three-valued logic
 
 ```sql
-SELECT NULL = 10;      -- UNKNOWN
-SELECT NULL <> 10;     -- UNKNOWN
-SELECT NULL = NULL;    -- UNKNOWN
+SELECT NULL = 10;     -- NULL / UNKNOWN
+SELECT NULL <> 10;    -- NULL / UNKNOWN
+SELECT NULL = NULL;   -- NULL / UNKNOWN
 ```
 
-`WHERE` chỉ giữ row khi predicate là `TRUE`; `FALSE` và `UNKNOWN` đều bị loại.
-
-Do đó:
-
-```sql
-WHERE email = NULL
-```
-
-không phải cách tìm email thiếu.
-
-Đúng:
+Tìm missing value:
 
 ```sql
 WHERE email IS NULL
 ```
 
-### 3.2 `NOT IN` + NULL trap
-
-Giả sử subquery trả một giá trị `NULL`:
+không phải:
 
 ```sql
-WHERE customer_id NOT IN (1, 2, NULL)
+WHERE email = NULL
 ```
 
-Các phép so sánh có thể trở thành `UNKNOWN`, khiến kết quả khác trực giác.
+### 4.2 Null-safe equality in Databricks
 
-Trong anti-join logic, thường nên reasoning kỹ với `NOT EXISTS`.
-
-### 3.3 `COALESCE`
-
-Trả expression đầu tiên không NULL:
+Databricks hỗ trợ null-safe comparison.
 
 ```sql
-COALESCE(email, 'missing@example.invalid')
+SELECT equal_null(NULL, NULL);  -- true
 ```
 
-Nhưng đừng lạm dụng để che giấu quality issue. `COALESCE` thay presentation/value semantics; nó không sửa nguồn dữ liệu.
+và operator `<=>` có semantics tương tự cho null-safe equality.
 
-### 3.4 `NULLIF`
+Không dùng null-safe equality thay `IS NULL` một cách máy móc; chọn theo intent.
 
-`NULLIF(a, b)` trả `NULL` nếu `a = b`.
+### 4.3 NOT IN + NULL trap
 
-Pattern tránh divide-by-zero:
+Nếu set phía phải có `NULL`, anti-membership có thể trở thành UNKNOWN.
+
+Với anti-join business question, thường ưu tiên:
 
 ```sql
-successful_calls::numeric / NULLIF(total_calls, 0)
+WHERE NOT EXISTS (...)
 ```
 
-### 3.5 `CASE`
+hoặc Databricks-native:
+
+```sql
+LEFT ANTI JOIN
+```
+
+sẽ học ở Lesson 04.
+
+### 4.4 `COALESCE`
+
+```sql
+COALESCE(email, 'missing')
+```
+
+trả expression đầu tiên không NULL.
+
+Nhưng:
+
+```sql
+COALESCE(birth_date, DATE '1900-01-01')
+```
+
+có thể biến “unknown” thành dữ liệu giả và làm metric sai.
+
+### 4.5 `NULLIF`
+
+Tránh denominator zero:
+
+```sql
+numerator / NULLIF(denominator, 0)
+```
+
+Nếu denominator = 0 → result NULL thay vì chia 0.
+
+### 4.6 `CASE`
 
 ```sql
 CASE
-    WHEN amount >= 500000 THEN 'high'
-    WHEN amount >= 100000 THEN 'medium'
-    ELSE 'low'
+  WHEN amount >= 500000 THEN 'high'
+  WHEN amount >= 100000 THEN 'medium'
+  ELSE 'low'
 END
 ```
 
-Thứ tự condition quan trọng: SQL xét từ trên xuống và lấy nhánh đầu tiên match.
+Order condition quan trọng: nhánh đầu tiên match thắng.
 
-### 3.6 Data types
+### 4.7 Databricks type rules
 
-Một số nhóm type quan trọng:
+Databricks có:
 
-- integer/bigint;
-- numeric/decimal;
-- floating point;
-- text/varchar;
-- date;
-- timestamp;
-- boolean.
+- type promotion;
+- implicit downcasting trong một số context;
+- implicit crosscasting khi intent đủ rõ;
+- least-common-type resolution cho expressions/set operations.
 
-Tiền nên dùng fixed-precision numeric/decimal thay vì floating point khi cần exact arithmetic.
+Mental rule cho course:
 
-### 3.7 Date/timestamp boundaries
+> Nếu correctness phụ thuộc type, cast explicit.
 
-Tránh:
+Ví dụ money:
 
 ```sql
-WHERE transaction_ts BETWEEN '2026-08-01' AND '2026-08-05'
+CAST(amount AS DECIMAL(14,2))
 ```
 
-nếu ý muốn bao gồm toàn bộ ngày 05/08, vì literal cuối có thể tương ứng đầu ngày.
+không dựa vào `DOUBLE` nếu cần exact decimal arithmetic.
 
-Dùng half-open interval:
+### 4.8 `CAST` vs `try_cast`
+
+Strict:
 
 ```sql
-WHERE transaction_ts >= TIMESTAMP '2026-08-01'
-  AND transaction_ts <  TIMESTAMP '2026-08-06'
+SELECT CAST('123' AS INT);   -- 123
+SELECT CAST('abc' AS INT);   -- error in strict/ANSI behavior
 ```
 
-Pattern `[start, next_start)` ghép các khoảng liên tiếp mà không overlap.
+Tolerant:
 
-### 3.8 Predicate placement với `LEFT JOIN`
+```sql
+SELECT try_cast('123' AS INT); -- 123
+SELECT try_cast('abc' AS INT); -- NULL
+```
 
-Muốn giữ mọi customer và chỉ attach successful transactions:
+Data-quality pattern:
+
+```sql
+SELECT
+  raw_amount,
+  try_cast(raw_amount AS DECIMAL(14,2)) AS parsed_amount,
+  CASE
+    WHEN raw_amount IS NOT NULL
+     AND try_cast(raw_amount AS DECIMAL(14,2)) IS NULL
+    THEN 'invalid_amount'
+  END AS quality_issue
+FROM staging;
+```
+
+### 4.9 Time boundaries
+
+Toàn bộ ngày 05/08:
+
+```sql
+WHERE event_ts >= TIMESTAMP '2026-08-05 00:00:00'
+  AND event_ts <  TIMESTAMP '2026-08-06 00:00:00'
+```
+
+### 4.10 LEFT JOIN predicate placement
+
+Preserve all customers and attach only successful transactions:
 
 ```sql
 SELECT c.customer_id, b.transaction_id
@@ -163,122 +251,162 @@ LEFT JOIN billing_transactions b
  AND b.status = 'success';
 ```
 
-Nếu viết:
+Potential bug:
 
 ```sql
+SELECT c.customer_id, b.transaction_id
+FROM customers c
 LEFT JOIN billing_transactions b
   ON b.customer_id = c.customer_id
 WHERE b.status = 'success';
 ```
 
-row không match có `b.status = NULL`, predicate trở thành UNKNOWN và bị loại. Kết quả mất tính “giữ mọi customer”.
+Unmatched rows có `b.status = NULL` nên không pass `WHERE`.
 
 ---
 
-## 4. Worked example – Customer contact quality
+## 5. Worked example – Parse-quality pattern
 
-### Requirement
+Giả sử staging có:
 
-Phân loại customer theo contact quality:
-
-- `valid_email`: có email;
-- `missing_email`: email NULL;
-- đồng thời gắn age group nếu birth date tồn tại.
-
-```sql
-SELECT
-    customer_id,
-    full_name,
-    CASE
-        WHEN email IS NULL THEN 'missing_email'
-        ELSE 'valid_email'
-    END AS email_quality,
-    CASE
-        WHEN birth_date IS NULL THEN 'unknown_age'
-        WHEN birth_date > DATE '2002-01-01' THEN 'young'
-        WHEN birth_date > DATE '1998-01-01' THEN 'mid'
-        ELSE 'older'
-    END AS age_group
-FROM customers;
+```text
+raw_amount STRING
 ```
 
-### Principle check
+Requirement:
 
-Đừng `COALESCE(birth_date, DATE '1900-01-01')` rồi tính tuổi, vì “unknown birth date” sẽ bị biến thành “rất già” — technical convenience làm thay đổi business meaning.
+- parse được → DECIMAL;
+- malformed → không làm query chết;
+- malformed phải được nhìn thấy bởi quality check.
+
+```sql
+WITH parsed AS (
+  SELECT
+    raw_amount,
+    try_cast(raw_amount AS DECIMAL(14,2)) AS amount
+  FROM VALUES
+    ('100000'),
+    ('25000.50'),
+    ('bad'),
+    (NULL)
+  AS t(raw_amount)
+)
+SELECT
+  raw_amount,
+  amount,
+  CASE
+    WHEN raw_amount IS NULL THEN 'missing'
+    WHEN amount IS NULL THEN 'malformed'
+    ELSE 'valid'
+  END AS parse_status
+FROM parsed;
+```
+
+Điểm chính:
+
+> `try_cast` là error-tolerant parsing primitive; quality classification mới là business/data-engineering logic.
 
 ---
 
-## 5. Hands-on lab
+## 6. Hands-on lab
 
-Tạo `lesson-02.sql`.
+### Core
 
-1. Liệt kê customer thiếu email.
-2. Đếm NULL `segment`, NULL `birth_date`, NULL `email`.
-3. Tính successful revenue trong đúng 5 ngày 01–05/08/2026 bằng half-open interval.
-4. Tạo transaction category bằng `CASE`: `<50k`, `50k–<200k`, `>=200k`.
-5. Tính `call_drop_rate = drop_count / total_call_end_or_drop`, không lỗi khi denominator = 0.
-6. Viết một query `LEFT JOIN` giữ mọi customer kể cả người không có successful transaction.
-7. Viết phiên bản sai đặt filter ở `WHERE`, so sánh row count và giải thích.
-8. Tạo cột `contact_channel` theo rule: email nếu có, nếu không là `'no_email'`.
-9. Tìm transaction có `payment_method IS NULL`; quyết định có nên thay bằng `'unknown'` trong serving layer và giải thích.
+1. Customer thiếu email/birth date.
+2. Count NULL theo province.
+3. Successful revenue trong `[2026-08-01, 2026-08-06)`.
+4. Transaction value band bằng `CASE`.
+5. Safe ratio bằng `NULLIF`.
+6. LEFT JOIN preserve all customers; so với phiên bản filter sai trong `WHERE`.
 
-### Challenge – NULL anti-join
+### Databricks-specific
 
-Tạo một temporary table/list có `customer_id` và một giá trị NULL. So sánh:
+7. Chạy và giải thích:
 
 ```sql
-NOT IN (...)
+SELECT try_cast('42' AS INT), try_cast('bad' AS INT);
+```
+
+8. So sánh `CAST` và `try_cast` trên malformed values.
+9. Thử type introspection:
+
+```sql
+SELECT typeof(1), typeof(1.0), typeof(NULL);
+```
+
+10. Tạo `VALUES` dataset chứa numeric strings + invalid strings; parse bằng `try_cast`; thống kê valid/malformed/missing.
+11. So sánh:
+
+```sql
+NULL = NULL
 ```
 
 với:
 
 ```sql
-NOT EXISTS (...)
+equal_null(NULL, NULL)
 ```
 
-Ghi kết luận về NULL semantics.
+và giải thích intent.
+
+### Challenge
+
+Thiết kế Bronze → Silver rule cho field `duration_seconds` nhận STRING:
+
+```text
+null input
+valid non-negative integer
+malformed string
+negative integer
+```
+
+Viết query classification và nói row nào nên quarantine.
 
 ---
 
-## 6. Knowledge check – MCQ
+## 7. Knowledge check – MCQ
 
-**Q1.** `NULL = NULL` trả về gì theo SQL semantics?  
-A. TRUE; B. FALSE; C. UNKNOWN; D. 0.
-
-**Q2.** Cách đúng để tìm email thiếu?  
-A. `email = NULL`; B. `email IS NULL`; C. `email == NULL`; D. `NOT email`.
-
-**Q3.** `WHERE` giữ row khi predicate là:  
+**Q1.** `WHERE` giữ row khi predicate là:  
 A. TRUE; B. TRUE hoặc UNKNOWN; C. FALSE; D. NULL.
 
-**Q4.** Half-open interval cho toàn bộ ngày 05/08 nên kết thúc ở:  
-A. `<= '2026-08-05'`; B. `< '2026-08-06'`; C. `< '2026-08-05'`; D. `= '2026-08-05'`.
+**Q2.** Tìm missing email:  
+A. `email = NULL`; B. `email IS NULL`; C. `email == NULL`; D. `NOT email`.
 
-**Q5.** Filter right-table trong `WHERE` sau `LEFT JOIN` có thể:  
-A. giữ chắc mọi row trái; B. loại unmatched rows; C. tạo index; D. bỏ duplicate tự động.
+**Q3.** Databricks `try_cast('bad' AS INT)` chủ yếu:  
+A. error luôn; B. trả NULL nếu cast combination hợp lệ nhưng value malformed; C. trả 0; D. trả STRING.
 
-**Q6.** `COALESCE` nên được hiểu là:  
-A. data-quality validator; B. chọn giá trị đầu tiên không NULL; C. dedup engine; D. join algorithm.
+**Q4.** Khi invalid amount phải làm pipeline fail fast, lựa chọn phù hợp hơn:  
+A. `try_cast` rồi bỏ qua; B. strict `CAST`/validation fail; C. COALESCE 0; D. DISTINCT.
 
----
+**Q5.** Half-open interval toàn ngày Aug-05 kết thúc:  
+A. `<= Aug-05`; B. `< Aug-06`; C. `< Aug-05`; D. `= Aug-05`.
 
-## 7. Knowledge check – Tự luận / Interview
+**Q6.** Right-side filter trong `WHERE` sau LEFT JOIN có thể:  
+A. preserve unmatched chắc chắn; B. loại unmatched rows; C. dedup; D. cluster table.
 
-1. Tại sao SQL cần three-valued logic?
-2. Vì sao `NOT IN` có NULL dễ tạo bug?
-3. Khi nào `COALESCE` hợp lý và khi nào nó che giấu data-quality issue?
-4. Giải thích khác nhau giữa filter trong `ON` và filter trong `WHERE` với `LEFT JOIN`.
-5. Vì sao tiền không nên mặc định dùng floating-point?
-6. Tại sao `[start, end)` thuận lợi cho pipeline chạy theo partition thời gian?
-7. Cho một ví dụ business nơi NULL khác hoàn toàn với zero.
+**Q7.** `equal_null(NULL,NULL)` khác `NULL = NULL` ở chỗ:  
+A. null-safe comparison trả true; B. giống hệt; C. delete NULL; D. cast NULL.
 
 ---
 
-## 8. Exit criteria
+## 8. Tự luận / Interview
 
-- [ ] Giải thích được TRUE/FALSE/UNKNOWN.
+1. `NULL` khác zero như thế nào trong metric?
+2. `try_cast` nên dùng ở Bronze→Silver khi nào?
+3. Tại sao “parse failure thành NULL” chưa đủ để gọi là data quality?
+4. Implicit cast tiện nhưng có rủi ro gì?
+5. `LEFT JOIN` + WHERE right-side predicate phá semantics ra sao?
+6. Khi nào dùng null-safe equality thay `IS NULL`?
+7. Vì sao `[start,end)` phù hợp incremental batches?
+
+---
+
+## 9. Exit criteria
+
 - [ ] Không dùng `= NULL`.
+- [ ] Giải thích TRUE/FALSE/UNKNOWN.
+- [ ] Phân biệt `CAST` và `try_cast`.
+- [ ] Viết quality classification cho malformed value.
 - [ ] Viết đúng half-open timestamp filter.
-- [ ] Chứng minh được một `LEFT JOIN` bị phá bởi filter sai vị trí.
-- [ ] Giải thích `NOT IN` vs `NOT EXISTS` khi có NULL.
-- [ ] Đạt ít nhất 5/6 MCQ.
+- [ ] Giải thích LEFT JOIN predicate placement.
+- [ ] Đạt >=6/7 MCQ.

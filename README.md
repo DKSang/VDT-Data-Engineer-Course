@@ -53,8 +53,8 @@ Tên sản phẩm/feature trong lesson phải ưu tiên terminology hiện hành
 | 01 | Data Engineering Foundations & System Thinking | ✅ Complete – source audit started |
 | 02 | SQL for Data Engineers | ✅ Complete – Databricks SQL + Delta + Query Profile |
 | 03 | Python for Data Engineers | ✅ Complete – Databricks Academy Python backbone |
-| 04 | DSA for Data Engineer Interviews | ⏳ Planned |
-| 05 | Database Fundamentals | ⏳ Planned |
+| 04 | DSA for Data Engineer Interviews | ⏭ Skipped / Optional draft |
+| 05 | Database Fundamentals | ✅ Complete – PostgreSQL fundamentals + Databricks/Delta contrast |
 | 06 | Data Warehouse & Dimensional Modeling | ⏳ Planned |
 | 07 | Linux, Git & Docker | ⏳ Planned |
 | 08 | Distributed Systems & Hadoop | ⏳ Planned |
@@ -68,7 +68,7 @@ Tên sản phẩm/feature trong lesson phải ưu tiên terminology hiện hành
 | 16 | Capstone – Telecom Data Platform | ⏳ Planned |
 | 17 | VDT Technical Test & Interview | ⏳ Planned |
 
-> Curriculum module names có thể được tinh chỉnh sau khi audit Databricks Learning Plan, nhưng các prerequisite phục vụ VDT như SQL, Python, DSA, database fundamentals vẫn được giữ.
+> Module 04 có một số lesson draft đã được viết trước khi bị skip. Chúng được giữ lại như tài liệu optional; không phải prerequisite bắt buộc để tiếp tục curriculum hiện tại.
 
 ## Module đã hoàn thành
 
@@ -108,7 +108,7 @@ PostgreSQL setup remains in the repo only as **optional local SQL practice**. Po
 
 ### Module 03 – Python for Data Engineers
 
-Databricks backbone: **Introduction to Python for Data Science and Data Engineering**, Databricks for Python developers, workspace files/modules, pandas on Databricks, unit testing and PySpark introductory documentation.
+Databricks backbone: **Introduction to Python for Data Science and Data Engineering**, Databricks for Python developers, workspace files/modules, pandas on Databricks, unit testing và PySpark introductory documentation.
 
 - Objects, names, types & mutability
 - Collections, control flow & complexity
@@ -124,6 +124,27 @@ Databricks backbone: **Introduction to Python for Data Science and Data Engineer
 Python language semantics that are not Databricks-specific use Python official documentation as **Supplementary prerequisite**. The module intentionally stops before Spark execution internals; those belong to Module 09.
 
 ➡️ [`docs/module-03-python-for-data-engineers`](docs/module-03-python-for-data-engineers/README.md)
+
+### Module 05 – Database Fundamentals
+
+**Classification:** Supplementary prerequisite with Databricks/Delta contrast.
+
+Primary RDBMS lab uses PostgreSQL 18 because the module needs observable database behavior: constraints, transactions, MVCC, isolation, locks, deadlocks, indexes and planner statistics. Databricks official docs remain canonical for the Delta/lakehouse side of the comparison.
+
+- OLTP vs OLAP/lakehouse workload reasoning
+- Relational modeling, functional dependencies, 1NF/2NF/3NF
+- PK/FK/UNIQUE/NOT NULL/CHECK and data-integrity contracts
+- Transactions, ACID, WAL and crash-recovery mental model
+- MVCC, Read Committed, Repeatable Read, Serializable, locks and deadlocks
+- B-tree/hash/GIN/BRIN awareness, composite indexes and selectivity
+- PostgreSQL planner, statistics and `EXPLAIN (ANALYZE, BUFFERS)`
+- PostgreSQL ↔ Delta transaction-log, snapshot and optimistic-concurrency comparison
+- Databricks enforced vs informational constraint differences
+- OLTP → lakehouse CDC/key/order/delete/retry/reconciliation reasoning
+- PostgreSQL + Databricks contrast labs + 50-question practice set
+- Final Assessment 100 points + Suggested Solutions
+
+➡️ [`docs/module-05-database-fundamentals`](docs/module-05-database-fundamentals/README.md)
 
 ## Case study xuyên suốt
 
@@ -156,6 +177,8 @@ Operational DB / APIs / Network Events
 Module 02 dùng cùng telecom domain trên **Delta tables** để luyện SQL semantics, dedup, MERGE và query-performance reasoning. PostgreSQL copy chỉ là local fallback.
 
 Module 03 đưa cùng domain sang Python local/bounded processing với dirty CSV/JSONL, explicit data contracts, quarantine, deterministic dedup, unit testing và Databricks development mapping. Mục tiêu là chứng minh business semantics trước khi scale bằng Spark.
+
+Module 05 quay lại **operational database layer** để hiểu nguồn dữ liệu thực sự hoạt động ra sao: transaction boundary, isolation, integrity, index/planner và cách các guarantees đó thay đổi khi dữ liệu được đưa vào Delta/lakehouse.
 
 ## Cách học
 

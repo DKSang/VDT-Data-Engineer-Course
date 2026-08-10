@@ -6,7 +6,7 @@
 
 Khóa học không bắt đầu bằng việc học thuộc tool. Trọng tâm là hiểu **principle**, **fundamental**, cơ chế bên dưới, trade-off kiến trúc và khả năng giải thích quyết định kỹ thuật.
 
-Từ phiên bản hiện tại, khóa học áp dụng **Databricks-first source policy**:
+Khóa học áp dụng **Databricks-first source policy**:
 
 - Databricks Documentation, Databricks Academy và official Databricks learning/certification content là nguồn canonical cho các chủ đề mà Databricks có tài liệu chính thức.
 - Nội dung repo không sao chép course Databricks; repo diễn giải lại bằng tiếng Việt và thêm fundamental, telecom labs, failure reasoning, MCQ, tự luận và VDT interview questions.
@@ -30,9 +30,10 @@ Mỗi lesson có cấu trúc cố định:
 
 Course được đối chiếu thường xuyên với các nguồn chính thức như:
 
-- Data Engineering with Databricks
+- Data Engineering with Databricks / Get Started with Databricks for Data Engineering
 - Data Engineering Concepts
 - Databricks Data Engineer Learning Plan
+- Introduction to Python for Data Science and Data Engineering
 - Databricks SQL Language Reference
 - Apache Spark on Databricks / PySpark DataFrames
 - Delta Lake
@@ -51,7 +52,7 @@ Tên sản phẩm/feature trong lesson phải ưu tiên terminology hiện hành
 |---|---|---|
 | 01 | Data Engineering Foundations & System Thinking | ✅ Complete – source audit started |
 | 02 | SQL for Data Engineers | ✅ Complete – Databricks SQL primary reference |
-| 03 | Python for Data Engineers | ⏳ Planned |
+| 03 | Python for Data Engineers | ✅ Complete – Databricks Academy Python backbone |
 | 04 | DSA for Data Engineer Interviews | ⏳ Planned |
 | 05 | Database Fundamentals | ⏳ Planned |
 | 06 | Data Warehouse & Dimensional Modeling | ⏳ Planned |
@@ -102,6 +103,25 @@ Official Databricks alignment: Data Engineering concepts, Lakehouse Architecture
 
 ➡️ [`docs/module-02-sql-for-data-engineers`](docs/module-02-sql-for-data-engineers/README.md)
 
+### Module 03 – Python for Data Engineers
+
+Databricks backbone: **Introduction to Python for Data Science and Data Engineering**, Databricks for Python developers, workspace files/modules, pandas on Databricks, unit testing and PySpark introductory documentation.
+
+- Objects, names, types & mutability
+- Collections, control flow & complexity
+- Functions, scope, modules & classes
+- Iterables, iterators & generators
+- Files, CSV, JSON, timezone & data contracts
+- pandas for bounded data & Spark boundary
+- Exceptions, logging, testing & reliable scripts
+- Python development on Databricks + bridge to PySpark
+- Telecom Python ETL lab + sample dirty data + 30-question practice set
+- Final Assessment 100 points + Suggested Solutions
+
+Python language semantics that are not Databricks-specific use Python official documentation as **Supplementary prerequisite**. The module intentionally stops before Spark execution internals; those belong to Module 09.
+
+➡️ [`docs/module-03-python-for-data-engineers`](docs/module-03-python-for-data-engineers/README.md)
+
 ## Case study xuyên suốt
 
 Khóa học sử dụng một **Telecom Data Platform giả lập** để nối các module thành một hệ thống duy nhất:
@@ -130,7 +150,9 @@ Operational DB / APIs / Network Events
 
 Ở các module Databricks, architecture trên sẽ được hiện thực bằng các primitive hiện hành như Delta Lake, Lakeflow Connect, Structured Streaming, Lakeflow Spark Declarative Pipelines, Lakeflow Jobs và Unity Catalog khi phù hợp.
 
-Module 02 đưa case study vào PostgreSQL với các bảng customer, subscription, billing, network event và status history. Dataset được cố tình cài duplicate, late-arriving event và history fan-out để luyện các lỗi Data Engineering thực tế.
+Module 02 đưa case study vào PostgreSQL với các bảng customer, subscription, billing, network event và status history.
+
+Module 03 đưa cùng domain sang Python local/bounded processing với dirty CSV/JSONL, explicit data contracts, quarantine, deterministic dedup, unit testing và Databricks development mapping. Mục tiêu là chứng minh business semantics trước khi scale bằng Spark.
 
 ## Cách học
 

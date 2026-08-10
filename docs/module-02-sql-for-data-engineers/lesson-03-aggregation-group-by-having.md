@@ -1,223 +1,272 @@
-# Lesson 03 – Aggregation, GROUP BY, HAVING & Grain Control
+# Lesson 03 – Aggregation, GROUP BY, HAVING & Databricks Aggregate Patterns
 
 ## 1. Learning objectives
 
 Sau bài này, bạn phải có thể:
 
-- Chuyển input grain thành output grain bằng aggregation có chủ đích.
-- Giải thích khác nhau giữa `WHERE` và `HAVING`.
-- Dùng `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` đúng semantics.
-- Phân biệt `COUNT(*)`, `COUNT(column)` và `COUNT(DISTINCT column)`.
-- Dùng conditional aggregation để tạo metric.
-- Nhận diện double-counting trước/sau join.
-- Viết reconciliation query cho aggregate result.
+- Chuyển input grain → output grain bằng aggregation có chủ đích.
+- Phân biệt `WHERE` và `HAVING` theo Databricks SQL semantics.
+- Dùng `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COUNT(DISTINCT ...)` đúng nghĩa.
+- Dùng Databricks aggregate `FILTER` và `count_if` khi phù hợp.
+- Nhận diện double-counting do join trước aggregation.
+- Viết ratio metric có denominator rõ.
+- Reconcile aggregate result với base population.
+- Nhận biết `GROUPING SETS` / `ROLLUP` / `CUBE` ở mức awareness.
 
 ---
 
-## 2. Principles
+## 2. Source alignment
 
-### Principle 1 – GROUP BY is a grain-changing operator
+### Primary Databricks sources
 
-Nếu input là 1 row/transaction và `GROUP BY customer_id`, output trở thành 1 row/customer.
+- `GROUP BY`  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-groupby
+- `HAVING`  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-having
+- `count_if`  
+  https://docs.databricks.com/aws/en/sql/language-manual/functions/count_if
+- SQL built-in functions  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-functions
 
-Hãy nói grain trước khi code:
+### Scope note
+
+Databricks hỗ trợ advanced grouping (`GROUPING SETS`, `ROLLUP`, `CUBE`) và aggregate `FILTER`. Module này ưu tiên metric correctness trước; advanced grouping chỉ cần hiểu use case, không học syntax exhaustive.
+
+---
+
+## 3. Principles
+
+### Principle 1 – GROUP BY changes grain
 
 ```text
-Input grain: 1 row / transaction
-Output grain: 1 row / customer / day
+Input:  1 row / transaction
+GROUP BY customer_id
+Output: 1 row / customer
 ```
 
-Sau đó `GROUP BY` phải phản ánh đúng grain mới.
+Hoặc:
 
-### Principle 2 – Aggregate only after deciding what a metric means
+```text
+GROUP BY CAST(transaction_ts AS DATE), province
+→ 1 row / day / province
+```
 
-“Revenue” có thể nghĩa:
+Nếu `GROUP BY` không phản ánh output grain, metric chưa có contract rõ.
 
-- tất cả amount;
-- chỉ `success`;
-- success trừ refund;
-- recognized revenue theo accounting period.
+### Principle 2 – Metric definition comes before function choice
 
-SQL không tự biết business definition. Metric definition phải rõ trước query.
+“Revenue” có thể là:
 
-### Principle 3 – Join before aggregate can multiply facts
+```text
+all amount
+successful amount only
+successful minus refunds
+recognized revenue in accounting period
+```
 
-Nếu join một fact table với relation không unique theo key, các fact rows bị nhân lên trước `SUM`, tạo metric sai nhưng vẫn chạy hợp lệ.
+`SUM(amount)` không tự quyết định business semantics.
 
-### Principle 4 – Every important aggregate needs reconciliation
+### Principle 3 – Aggregate after cardinality reasoning
 
-Nếu tính revenue by province, hãy kiểm tra tổng revenue của các province có bằng global revenue theo cùng filter không.
+Fact × history join có thể multiply fact rows trước `SUM`.
+
+Query vẫn chạy và kết quả vẫn “có vẻ hợp lý”, nên double-count nguy hiểm hơn syntax error.
+
+### Principle 4 – Reconciliation is part of the query design
+
+Một Gold metric quan trọng nên có independent check:
+
+```text
+sum(grouped output) == base total under same population/filter
+```
 
 ---
 
-## 3. Fundamentals
+## 4. Fundamentals
 
-### 3.1 Aggregate functions
+### 4.1 Core aggregate functions
 
 ```sql
 COUNT(*)
-COUNT(column)
-COUNT(DISTINCT column)
+COUNT(email)
+COUNT(DISTINCT customer_id)
 SUM(amount)
 AVG(amount)
 MIN(amount)
 MAX(amount)
 ```
 
-Khác biệt quan trọng:
+Semantics:
 
-```sql
-COUNT(*)
-```
+- `COUNT(*)`: rows;
+- `COUNT(expr)`: non-NULL values;
+- `COUNT(DISTINCT expr)`: distinct non-NULL expression values.
 
-đếm rows.
-
-```sql
-COUNT(email)
-```
-
-chỉ đếm rows có `email IS NOT NULL`.
-
-### 3.2 GROUP BY
+### 4.2 WHERE vs HAVING
 
 ```sql
 SELECT
-    customer_id,
-    SUM(amount) AS revenue
-FROM billing_transactions
-GROUP BY customer_id;
-```
-
-Mọi non-aggregated selected expression phải phù hợp với grouping semantics.
-
-### 3.3 WHERE vs HAVING
-
-`WHERE` filter rows **trước** aggregation.
-
-`HAVING` filter groups **sau** aggregation.
-
-```sql
-SELECT customer_id, SUM(amount) AS revenue
+  customer_id,
+  SUM(amount) AS revenue
 FROM billing_transactions
 WHERE status = 'success'
 GROUP BY customer_id
-HAVING SUM(amount) >= 300000;
+HAVING SUM(amount) >= 200000;
 ```
 
-Ở đây:
+`WHERE` chọn base rows.
 
-- `WHERE` loại failed/refunded transactions trước tính revenue;
-- `HAVING` chỉ giữ customer có aggregate revenue >= 300k.
+`HAVING` chọn aggregate groups.
 
-### 3.4 Conditional aggregation
+### 4.3 Conditional aggregation – portable form
 
 ```sql
 SELECT
-    customer_id,
-    SUM(CASE WHEN status = 'success' THEN amount ELSE 0 END) AS success_amount,
-    COUNT(CASE WHEN status = 'failed' THEN 1 END) AS failed_count
+  customer_id,
+  SUM(CASE WHEN status = 'success' THEN amount ELSE 0 END) AS success_amount,
+  SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
 FROM billing_transactions
 GROUP BY customer_id;
 ```
 
-PostgreSQL còn có `FILTER`, nhưng `CASE` portable hơn giữa nhiều SQL engine.
+### 4.4 Databricks aggregate FILTER
 
-### 3.5 Ratio metrics
-
-Ví dụ call-drop rate:
-
-```text
-drop rate = drop events / (drop + normal end events)
-```
-
-Query:
+Databricks aggregate functions có thể nhận `FILTER (WHERE ...)`.
 
 ```sql
 SELECT
-    tower_id,
-    SUM(CASE WHEN event_type = 'call_drop' THEN 1 ELSE 0 END)::numeric
-      / NULLIF(
-          SUM(CASE WHEN event_type IN ('call_drop','call_end') THEN 1 ELSE 0 END),
-          0
-        ) AS call_drop_rate
-FROM network_events
-GROUP BY tower_id;
+  customer_id,
+  SUM(amount) FILTER (WHERE status = 'success') AS success_amount,
+  COUNT(*) FILTER (WHERE status = 'failed') AS failed_count
+FROM billing_transactions
+GROUP BY customer_id;
 ```
 
-Nhưng dataset có duplicate event, nên metric này chưa chắc đúng. Đây là bài học: **aggregation correct syntax không đồng nghĩa correct data**. Dedup sẽ học ở Lesson 07.
+`FILTER` giúp metric population explicit ngay cạnh aggregate.
 
-### 3.6 Average of averages trap
+### 4.5 `count_if`
 
-Nếu group A có 10 rows average 100, group B có 1000 rows average 50:
+```sql
+SELECT
+  customer_id,
+  count_if(status = 'success') AS success_count,
+  count_if(status = 'failed') AS failed_count
+FROM billing_transactions
+GROUP BY customer_id;
+```
+
+Dùng khi intent chính là đếm TRUE conditions.
+
+### 4.6 Ratio metrics
+
+Call-drop rate:
+
+```sql
+WITH tower_metric AS (
+  SELECT
+    tower_id,
+    count_if(event_type = 'call_drop') AS drops,
+    count_if(event_type IN ('call_drop','call_end')) AS total_calls
+  FROM network_events
+  GROUP BY tower_id
+)
+SELECT
+  tower_id,
+  drops,
+  total_calls,
+  CAST(drops AS DOUBLE) / NULLIF(total_calls, 0) AS drop_rate
+FROM tower_metric;
+```
+
+Nhưng raw `network_events` có duplicate versions → metric chưa canonical. Dedup ở Lesson 07.
+
+### 4.7 Average-of-averages trap
+
+Nếu group sizes khác nhau:
 
 ```text
-(100 + 50) / 2
+AVG(group_avg)
 ```
 
-không phải overall average đúng.
+không nhất thiết bằng overall average.
 
-Cần weighted reasoning hoặc aggregate từ base data.
+Muốn overall metric, aggregate base numerator/denominator hoặc dùng weighted formulation.
 
-### 3.7 Distinct as warning sign
+### 4.8 DISTINCT is not a join repair tool
 
-`COUNT(DISTINCT customer_id)` có thể hoàn toàn đúng. Nhưng `SELECT DISTINCT` được thêm chỉ để “xóa duplicate sau join” thường là dấu hiệu bạn chưa hiểu cardinality.
+`COUNT(DISTINCT customer_id)` có thể đúng theo business metric.
 
-Đừng dùng `DISTINCT` như thuốc chữa join sai.
+Nhưng:
+
+```sql
+SELECT DISTINCT ...
+```
+
+thêm sau fan-out chỉ để “hết duplicate” là warning sign.
+
+### 4.9 Advanced grouping awareness
+
+Databricks hỗ trợ:
+
+```text
+GROUPING SETS
+ROLLUP
+CUBE
+GROUP BY ALL
+```
+
+Use case: tính nhiều subtotal/granularity từ cùng input.
+
+Module này không yêu cầu nhớ syntax chi tiết; cần biết chúng là **multi-grain aggregations** và output phải được interpret cẩn thận.
 
 ---
 
-## 4. Worked example – Daily province revenue
+## 5. Worked example – Daily province revenue
 
 ### Requirement
 
-Tính successful revenue theo ngày và province.
-
-### Grain reasoning
+Successful revenue theo ngày/province.
 
 ```text
 billing_transactions: 1 row / transaction
 customers:            1 row / customer
-relationship:         many transactions -> one customer
-output:               1 row / transaction_date / province
+join:                 N:1 nếu customer key unique
+output:               1 row / date / province
 ```
-
-Vì `customers.customer_id` unique, join N:1 không nhân transaction nếu data contract giữ đúng.
 
 ```sql
 SELECT
-    b.transaction_ts::date AS revenue_date,
-    c.province,
-    COUNT(*) AS transaction_count,
-    COUNT(DISTINCT b.customer_id) AS paying_customers,
-    SUM(b.amount) AS revenue
+  CAST(b.transaction_ts AS DATE) AS revenue_date,
+  c.province,
+  COUNT(*) AS successful_txn_count,
+  COUNT(DISTINCT b.customer_id) AS unique_paying_customers,
+  SUM(b.amount) AS successful_revenue
 FROM billing_transactions b
 JOIN customers c
   ON c.customer_id = b.customer_id
 WHERE b.status = 'success'
 GROUP BY
-    b.transaction_ts::date,
-    c.province
-ORDER BY revenue_date, c.province;
+  CAST(b.transaction_ts AS DATE),
+  c.province
+ORDER BY revenue_date, province;
+```
+
+### Databricks alternative metrics
+
+```sql
+SELECT
+  CAST(transaction_ts AS DATE) AS revenue_date,
+  SUM(amount) FILTER (WHERE status = 'success') AS successful_revenue,
+  count_if(status = 'failed') AS failed_count,
+  count_if(status = 'refunded') AS refunded_count
+FROM billing_transactions
+GROUP BY CAST(transaction_ts AS DATE)
+ORDER BY revenue_date;
 ```
 
 ### Reconciliation
 
-```sql
-WITH by_province AS (
-    SELECT
-        b.transaction_ts::date AS revenue_date,
-        c.province,
-        SUM(b.amount) AS revenue
-    FROM billing_transactions b
-    JOIN customers c ON c.customer_id = b.customer_id
-    WHERE b.status = 'success'
-    GROUP BY b.transaction_ts::date, c.province
-)
-SELECT SUM(revenue)
-FROM by_province;
-```
-
-So sánh với:
+Grouped successful revenue phải reconcile với:
 
 ```sql
 SELECT SUM(amount)
@@ -225,106 +274,122 @@ FROM billing_transactions
 WHERE status = 'success';
 ```
 
-Nếu khác, cần điều tra missing customer, duplicate dimension key hoặc filter không đồng nhất.
+Nếu khác sau join dimension, kiểm tra:
+
+- orphan keys;
+- dimension duplicates;
+- filter mismatch;
+- join condition.
 
 ---
 
-## 5. Hands-on lab
+## 6. Hands-on lab
 
-Tạo `lesson-03.sql`.
-
-### Core exercises
+### Core
 
 1. Revenue theo `transaction_type`.
-2. Revenue theo ngày.
-3. Revenue theo province/ngày.
-4. Số successful/failed/refunded transaction bằng conditional aggregation.
-5. Customer có successful revenue >= 200k dùng `HAVING`.
-6. Đếm số customer có email và thiếu email theo province.
-7. Tính average successful transaction amount theo payment method.
-8. Tính call-drop rate/tower, trước mắt chưa dedup.
-9. Tìm tower có ít nhất 2 call end/drop events và drop rate > 30%.
-10. Viết reconciliation cho revenue by province.
+2. Revenue/day.
+3. Revenue/day/province.
+4. Customer có successful revenue >= 200k bằng `HAVING`.
+5. Average successful amount/payment method.
+6. Reconcile revenue by province với base total.
 
-### Double-count experiment
+### Databricks-specific
 
-Tạo CTE `status_history` rồi join trực tiếp:
+7. Viết cùng một conditional metric bằng:
 
-```sql
-billing_transactions b
-JOIN customer_status_history h
-  ON h.customer_id = b.customer_id
+```text
+SUM(CASE...)
+aggregate FILTER
+count_if
 ```
 
-Sau đó `SUM(b.amount)`.
+và giải thích khi nào mỗi form rõ hơn.
 
-So sánh với base successful revenue.
+8. Tạo daily metric:
 
-Trả lời:
+```text
+successful_revenue
+successful_count
+failed_count
+refunded_count
+unique_paying_customers
+```
 
-- Vì sao total bị tăng?
-- `customer_status_history` có grain gì?
-- Join relationship thực tế là gì?
-- Sửa bằng cách nào nếu business muốn latest customer status?
+9. Thử một `ROLLUP` hoặc `GROUPING SETS` đơn giản cho province/date và xác định rows subtotal.
 
-Chưa cần viết final solution bằng window function; chỉ cần mô tả relation cần tạo trước join.
+### Fan-out experiment
+
+10. Join billing với `customer_status_history` chỉ theo `customer_id`, sau đó `SUM(amount)`.
+11. Đo:
+
+```text
+base successful rows
+joined rows
+base revenue
+joined revenue
+```
+
+12. Mô tả relation đúng cần tạo trước khi aggregate.
 
 ### Challenge
 
-Tạo daily metric gồm:
+Tạo KPI network per tower:
 
 ```text
-date
-successful_revenue
-successful_txn_count
-failed_txn_count
-unique_paying_customers
-avg_successful_txn_value
+total_call_events
+drops
+drop_rate
+avg_signal_dbm
 ```
 
-Ghi rõ mỗi metric có denominator/population nào.
+Sau đó ghi rõ vì sao result trên raw events chưa publish được nếu business key duplicate.
 
 ---
 
-## 6. Knowledge check – MCQ
+## 7. Knowledge check – MCQ
 
-**Q1.** `COUNT(email)` khác `COUNT(*)` vì:  
-A. chỉ đếm email unique; B. bỏ row có email NULL; C. nhanh hơn luôn; D. chỉ dùng với GROUP BY.
+**Q1.** `GROUP BY customer_id` thường:  
+A. preserve transaction grain; B. đổi output sang customer grain; C. create Delta version; D. broadcast table.
 
-**Q2.** `WHERE` và `HAVING` khác nhau chính ở:  
-A. WHERE trước grouping, HAVING sau grouping; B. không khác; C. HAVING trước FROM; D. WHERE chỉ cho string.
+**Q2.** `WHERE` vs `HAVING`:  
+A. WHERE base rows, HAVING groups; B. giống nhau; C. HAVING trước FROM; D. WHERE chỉ string.
 
-**Q3.** Nếu join fact với history table nhiều row/key rồi `SUM(fact.amount)`, rủi ro chính là:  
-A. syntax error; B. double-count; C. NULL tự mất; D. index hỏng.
+**Q3.** `count_if(status='failed')`:  
+A. đếm TRUE values; B. sum amount; C. dedup; D. anti join.
 
-**Q4.** `SELECT DISTINCT` sau join sai:  
-A. luôn là fix chuẩn; B. có thể che giấu lỗi cardinality; C. bắt buộc cho DE; D. làm key unique tại source.
+**Q4.** Aggregate `FILTER` trong Databricks:  
+A. filter rows đưa vào aggregate function; B. filter toàn table physically bắt buộc; C. create view; D. window only.
 
-**Q5.** Overall average từ average từng group có thể sai vì:  
-A. group size khác nhau; B. AVG không support number; C. GROUP BY random; D. NULL luôn thành zero.
+**Q5.** Fact join history nhiều version rồi SUM có risk:  
+A. fan-out/double-count; B. syntax fail chắc chắn; C. NULL auto zero; D. MERGE.
 
-**Q6.** Aggregate validation tốt cho revenue by province là:  
-A. `LIMIT 10`; B. reconcile tổng các province với global total cùng filter; C. sort DESC; D. đổi alias.
+**Q6.** `SELECT DISTINCT` sau join fan-out:  
+A. luôn fix; B. có thể che bug cardinality; C. required Databricks pattern; D. tương đương GROUP BY ALL.
 
----
-
-## 7. Knowledge check – Tự luận / Interview
-
-1. Giải thích `COUNT(*)`, `COUNT(column)`, `COUNT(DISTINCT column)` bằng NULL.
-2. Cho ví dụ `HAVING` đúng và một trường hợp đáng lẽ nên dùng `WHERE`.
-3. Vì sao average-of-averages nguy hiểm?
-4. Tại sao fact + SCD/history join dễ double-count?
-5. Conditional aggregation khác filter toàn query như thế nào?
-6. Khi nhìn một KPI `drop_rate = 3%`, bạn cần hỏi numerator và denominator gì?
-7. `DISTINCT` khi nào đúng về business và khi nào chỉ đang che bug?
+**Q7.** Overall average từ unweighted average-of-averages có thể sai vì:  
+A. group sizes khác nhau; B. Databricks không có AVG; C. Delta không numeric; D. window frame.
 
 ---
 
-## 8. Exit criteria
+## 8. Tự luận / Interview
 
-- [ ] Ghi đúng input/output grain cho mọi aggregate lab.
-- [ ] Phân biệt WHERE/HAVING không nhầm.
-- [ ] Tạo được ít nhất 3 conditional metrics trong một query.
-- [ ] Tự tạo và giải thích join double-count bug.
-- [ ] Có reconciliation query cho revenue.
-- [ ] Đạt ít nhất 5/6 MCQ.
+1. `GROUP BY` thay đổi grain thế nào?
+2. `FILTER` vs `CASE` conditional aggregation khác nhau chủ yếu ở đâu?
+3. `count_if` phù hợp với metric nào?
+4. Vì sao KPI phải định nghĩa numerator/denominator trước SQL?
+5. Cách chứng minh join làm revenue double-count?
+6. `ROLLUP`/`CUBE` tạo thách thức gì cho output grain?
+7. Reconciliation query nên độc lập ở mức nào với query chính?
+
+---
+
+## 9. Exit criteria
+
+- [ ] Ghi input/output grain cho mọi aggregate lab.
+- [ ] Phân biệt WHERE/HAVING.
+- [ ] Dùng được CASE, FILTER và count_if.
+- [ ] Tự tạo và đo join fan-out.
+- [ ] Có reconciliation query.
+- [ ] Nhận biết grouping sets/rollup/cube.
+- [ ] Đạt >=6/7 MCQ.

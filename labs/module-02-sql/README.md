@@ -1,43 +1,39 @@
 # Module 02 SQL Lab – Telecom Dataset
 
-## Mục tiêu
+## Primary environment: Databricks
 
-Lab này tạo một PostgreSQL database nhỏ nhưng đủ quan hệ để luyện:
+Module 02 now uses **Databricks SQL / Databricks Runtime + Delta tables** as the primary lab environment.
 
-- filtering và NULL semantics;
-- aggregation theo grain;
-- one-to-many / many-to-many join reasoning;
-- window functions;
-- dedup và latest-record patterns;
-- incremental extraction;
-- execution plan và index.
+Recommended setup:
 
-## Chạy nhanh bằng Docker
+1. Open a Databricks workspace / Free Edition.
+2. Choose a schema where you can create tables.
+3. Run:
 
-Nếu máy đã có Docker:
-
-```bash
-docker run --name vdt-postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=vdt_sql \
-  -p 5432:5432 \
-  -d postgres:18
+```text
+databricks-setup.sql
 ```
 
-Sau đó dùng `psql`, DBeaver, DataGrip hoặc VS Code PostgreSQL extension để chạy theo thứ tự:
+4. Run each lesson query in SQL editor or a notebook SQL cell.
+5. For Lesson 08, use `EXPLAIN` and the Databricks **Query Profile** after query execution.
+
+The setup intentionally does **not** rely on database-enforced primary/foreign keys. Learners must validate uniqueness and cardinality explicitly because Data Engineering pipelines frequently consume data where assumptions are logical contracts rather than enforced OLTP constraints.
+
+## Optional local environment: PostgreSQL
+
+The legacy files remain useful for offline SQL practice:
 
 ```text
 schema.sql
 seed.sql
 ```
 
-Nếu đã có PostgreSQL local thì không cần Docker.
+They are **supplementary only**. PostgreSQL B-tree/index/planner behavior is no longer part of Module 02 pass criteria.
 
 ## Data model
 
 ```text
 plans 1 ────────< subscriptions >──────── 1 customers
-                         │
                          │
 customers 1 ─────< billing_transactions
 
@@ -46,49 +42,78 @@ cell_towers 1 ───< network_events
 customers 1 ─────< customer_status_history
 ```
 
-### Grain của từng bảng
+### Expected grain
 
-| Bảng | Grain |
+| Table | Grain |
 |---|---|
 | `customers` | 1 row / customer |
 | `plans` | 1 row / plan |
 | `subscriptions` | 1 row / subscription contract |
 | `billing_transactions` | 1 row / billing transaction |
 | `cell_towers` | 1 row / cell tower |
-| `network_events` | 1 row / network event |
+| `network_events` | 1 row / ingested event version |
 | `customer_status_history` | 1 row / customer status change |
 
-## Quy ước quan trọng
+Important distinction: raw `network_events` is **not** 1 row/logical event because multiple ingested versions may share the same `event_id`.
 
-1. `network_events.event_id` trong schema không được ép unique để có thể luyện dedup.
-2. `customer_status_history` có thể có nhiều row/customer vì đây là history table.
-3. Một customer có thể có nhiều billing transaction và nhiều subscription theo thời gian.
-4. `subscriptions.ended_at IS NULL` nghĩa là contract chưa có thời điểm kết thúc được ghi nhận; không tự động đồng nghĩa với mọi định nghĩa business về “active”.
-5. Mọi câu hỏi aggregate phải ghi rõ grain output trước khi viết SQL.
+## Intentional data conditions
 
-## Workflow học
+- duplicate/versioned `network_events.event_id`;
+- late-arriving event;
+- history relation with multiple rows/customer;
+- NULL customer attributes;
+- success/failed/refunded billing states;
+- join fan-out opportunity;
+- time-based incremental extraction fields.
 
-Tạo thư mục cá nhân, ví dụ:
-
-```text
-my-work/module-02/
-├── lesson-01.sql
-├── lesson-02.sql
-├── ...
-├── lesson-08.sql
-└── notes.md
-```
-
-Với mỗi bài tập, lưu cả:
+## Per-exercise notebook/header template
 
 ```sql
--- Expected grain:
--- Assumptions:
--- Query:
+-- Expected input grain:
+-- Expected output grain:
+-- Business key:
+-- Cardinality assumption:
+-- Failure/data-quality risk:
 
--- Validation checks:
--- 1.
--- 2.
+-- Query
+
+-- Validation
 ```
 
-Đừng chỉ lưu query chạy được; hãy lưu reasoning khiến query đó đáng tin.
+## Databricks-specific experiments
+
+During Module 02 you should explicitly practice:
+
+```text
+QUALIFY
+LEFT SEMI JOIN
+LEFT ANTI JOIN
+try_cast
+MERGE INTO Delta table
+EXPLAIN FORMATTED / EXPLAIN COST
+Query Profile
+```
+
+Optional awareness:
+
+```text
+AQE
+Photon
+query performance insights
+ANALYZE TABLE / statistics
+```
+
+The deep internals are deferred to Spark/Databricks modules.
+
+## Files
+
+```text
+labs/module-02-sql/
+├── README.md
+├── databricks-setup.sql     # primary
+├── practice-set.md
+├── schema.sql               # optional PostgreSQL
+└── seed.sql                 # optional PostgreSQL
+```
+
+> The module goal is not “write SQL on any database”. It is to build strong relational reasoning and then apply it using the SQL surface that a Databricks Data Engineer actually works with.

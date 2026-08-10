@@ -1,74 +1,91 @@
-# Lesson 04 – JOINs, Cardinality & Set Operations
+# Lesson 04 – JOINs, Cardinality & Set Operations on Databricks
 
 ## 1. Learning objectives
 
 Sau bài này, bạn phải có thể:
 
 - Giải thích `INNER`, `LEFT`, `RIGHT`, `FULL`, `CROSS` join theo row-preservation semantics.
-- Dự đoán cardinality trước khi join.
-- Nhận diện one-to-one, one-to-many, many-to-one và accidental many-to-many.
-- Phân biệt join key kỹ thuật với business join condition theo thời gian.
-- Dùng semi-join/anti-join reasoning với `EXISTS`/`NOT EXISTS`.
-- Phân biệt `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`.
-- Debug missing keys và fan-out bằng validation queries.
+- Dùng Databricks `LEFT SEMI JOIN` và `LEFT ANTI JOIN` đúng intent.
+- Dự đoán matches per left row trước khi join.
+- Phát hiện accidental many-to-many và join fan-out.
+- Phân biệt entity-key join với temporal/effective-time join.
+- Dùng `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT` đúng semantics.
+- Viết validation cho duplicate key, orphan key và exploding join.
 
 ---
 
-## 2. Principles
+## 2. Source alignment
 
-### Principle 1 – JOIN is a cardinality operation
+### Primary Databricks sources
 
-Đừng hỏi trước “cú pháp LEFT JOIN là gì?”. Hãy hỏi:
+- JOIN  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-join
+- Set operators  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-setops
+- Query Profile – exploding join diagnostics  
+  https://docs.databricks.com/aws/en/sql/user/queries/query-profile
 
-> Mỗi row phía trái có thể match bao nhiêu row phía phải?
+### Scope note
 
-Nếu câu trả lời là “không biết”, query chưa đủ an toàn để aggregate.
+Databricks SQL exposes semi/anti joins directly in the JOIN syntax. Course vẫn dạy `EXISTS`/`NOT EXISTS` vì chúng là relational patterns quan trọng và portable; learner phải hiểu hai cách diễn đạt cùng business intent.
 
-### Principle 2 – Keys must be validated on the side expected to be unique
+---
 
-Nếu bạn tin `customers.customer_id` unique, database constraint có thể bảo vệ assumption đó. Nếu join với staging/dimension không có constraint, hãy kiểm tra uniqueness bằng query trước.
+## 3. Principles
 
-### Principle 3 – Outer join means row preservation
+### Principle 1 – JOIN is a cardinality operator
 
-`LEFT JOIN` nói rằng relation trái là population cần giữ. Mọi predicate sau đó phải tôn trọng intent đó.
-
-### Principle 4 – Time-aware joins are different from equality joins
-
-History/SCD table thường không thể join chỉ bằng:
-
-```sql
-ON fact.customer_id = dim.customer_id
-```
-
-mà còn cần điều kiện hiệu lực:
+Trước khi code, trả lời:
 
 ```text
-fact_time >= effective_from
-fact_time < effective_to
+Left grain:
+Right grain:
+Join key:
+Right key expected unique?
+Matches per left row?
+Rows nào cần preserve?
 ```
 
-Nếu bỏ temporal predicate, một fact có thể match nhiều versions.
+Nếu “matches per left row” không rõ, aggregate sau join chưa đáng tin.
+
+### Principle 2 – Row preservation defines outer-join intent
+
+`LEFT JOIN` nói rằng population phía trái phải được giữ.
+
+Nếu downstream filter làm mất unmatched rows, query đã đổi semantics.
+
+### Principle 3 – Existence does not require row multiplication
+
+Nếu câu hỏi chỉ là:
+
+> entity có match hay không?
+
+thì semi/anti join hoặc `EXISTS`/`NOT EXISTS` thường đúng intent hơn inner join + `DISTINCT`.
+
+### Principle 4 – History requires time-aware matching
+
+History relation nhiều row/entity thường cần validity condition, không chỉ equality key.
+
+### Principle 5 – Exploding join is both correctness and performance risk
+
+Databricks Query Profile có thể surface exploding join vì output rows tăng mạnh so với input. Trước khi coi đây là performance issue, hãy hỏi: **cardinality đó có đúng business semantics không?**
 
 ---
 
-## 3. Fundamentals
+## 4. Fundamentals
 
-### 3.1 INNER JOIN
-
-Chỉ giữ pairs có match.
+### 4.1 INNER JOIN
 
 ```sql
-SELECT ...
+SELECT b.transaction_id, c.province
 FROM billing_transactions b
-JOIN customers c
+INNER JOIN customers c
   ON c.customer_id = b.customer_id;
 ```
 
-Nếu `customers.customer_id` unique, đây là many-to-one từ transaction sang customer.
+Nếu `customers.customer_id` unique và mọi transaction có match, output giữ fact grain.
 
-### 3.2 LEFT JOIN
-
-Giữ mọi row trái, kể cả không match.
+### 4.2 LEFT JOIN
 
 ```sql
 SELECT c.customer_id, b.transaction_id
@@ -77,261 +94,245 @@ LEFT JOIN billing_transactions b
   ON b.customer_id = c.customer_id;
 ```
 
-Customer không transaction vẫn tồn tại với columns của `b` là NULL.
+Customer không có transaction vẫn tồn tại với right-side NULLs.
 
-### 3.3 FULL JOIN
+### 4.3 RIGHT / FULL JOIN
 
-Giữ unmatched từ cả hai phía. Hữu ích trong reconciliation/migration compare, nhưng ít dùng hơn trong pipeline thường ngày.
+`RIGHT`: preserve right relation.
 
-### 3.4 CROSS JOIN
+`FULL`: preserve unmatched rows ở cả hai phía.
 
-Cartesian product:
+`FULL JOIN` hữu ích cho reconciliation/source-vs-target compare.
 
-```text
-rows_out = rows_left × rows_right
-```
-
-Có use case hợp lệ như tạo calendar × entity grid, nhưng accidental cross join có thể bùng nổ dữ liệu.
-
-### 3.5 Cardinality checklist
-
-Trước mỗi join, ghi:
+### 4.4 CROSS JOIN
 
 ```text
-Left grain:
-Right grain:
-Join key:
-Expected right uniqueness:
-Expected matches per left row:
-Expected output grain:
+rows_out ≈ rows_left × rows_right
 ```
 
-Ví dụ:
+Hợp lệ cho use case như entity × calendar grid; nguy hiểm nếu accidental.
 
-```text
-Left: billing transaction
-Right: customer
-Key: customer_id
-Right uniqueness: exactly 1
-Matches per fact: 1
-Output grain: transaction
-```
+### 4.5 Databricks LEFT SEMI JOIN
 
-### 3.6 Join fan-out
-
-Nếu join `billing_transactions` với `customer_status_history` chỉ theo customer:
-
-```text
-transaction 3002
-   × status active
-   × status inactive
-   × status active
-```
-
-Một transaction biến thành 3 rows.
-
-Sau `SUM(amount)`, revenue bị nhân.
-
-### 3.7 Semi-join
-
-Câu hỏi:
-
-> Customer nào có ít nhất một successful transaction?
-
-Ta chỉ cần existence, không cần columns transaction.
+Trả **chỉ columns/rows phía trái có ít nhất một match**.
 
 ```sql
 SELECT c.*
 FROM customers c
-WHERE EXISTS (
-    SELECT 1
-    FROM billing_transactions b
-    WHERE b.customer_id = c.customer_id
-      AND b.status = 'success'
-);
+LEFT SEMI JOIN billing_transactions b
+  ON b.customer_id = c.customer_id
+ AND b.status = 'success';
 ```
 
-Đây là semantics của semi-join.
+Business meaning:
 
-### 3.8 Anti-join
+> customers có ít nhất một successful transaction.
 
-Customer chưa có successful transaction:
+Không fan-out left rows vì output là left relation membership.
+
+### 4.6 Databricks LEFT ANTI JOIN
+
+Trả rows phía trái **không có match**.
 
 ```sql
 SELECT c.*
 FROM customers c
-WHERE NOT EXISTS (
-    SELECT 1
-    FROM billing_transactions b
-    WHERE b.customer_id = c.customer_id
-      AND b.status = 'success'
-);
+LEFT ANTI JOIN billing_transactions b
+  ON b.customer_id = c.customer_id
+ AND b.status = 'success';
 ```
 
-### 3.9 Set operations
+Tương đương business intent của `NOT EXISTS` anti-join pattern.
 
-`UNION ALL`: nối rows, giữ duplicate.
+### 4.7 Fan-out
 
-`UNION`: nối rồi loại duplicate.
-
-`INTERSECT`: rows xuất hiện ở cả hai sets.
-
-`EXCEPT`: rows ở set trái nhưng không ở set phải.
-
-Trong data pipelines, `UNION ALL` thường đúng hơn khi ghép partitions/batches vì duplicate elimination phải là quyết định business riêng, không nên vô tình phát sinh do operator.
-
----
-
-## 4. Worked example – Active customer revenue without fan-out
-
-### Problem
-
-Muốn doanh thu theo **latest current status** của customer.
-
-Sai:
+Sai nếu business muốn current status nhưng join toàn history:
 
 ```sql
-SELECT h.status, SUM(b.amount)
+SELECT b.transaction_id, h.status
+FROM billing_transactions b
+JOIN customer_status_history h
+  ON h.customer_id = b.customer_id;
+```
+
+Một transaction/customer có thể match nhiều history rows.
+
+Proof:
+
+```sql
+SELECT
+  b.transaction_id,
+  COUNT(*) AS copies_after_join
 FROM billing_transactions b
 JOIN customer_status_history h
   ON h.customer_id = b.customer_id
-WHERE b.status = 'success'
-GROUP BY h.status;
+GROUP BY b.transaction_id
+HAVING COUNT(*) > 1;
 ```
 
-Vì history có nhiều row/customer.
+### 4.8 Temporal join
 
-### Relation cần tạo trước
-
-Ta cần relation:
-
-```text
-latest_customer_status
-Grain: 1 row / customer
-```
-
-Có thể tạo bằng window function ở Lesson 06/07. Logic khái niệm:
-
-```sql
-WITH latest_status AS (
-    -- one row per customer
-    ...
-)
-SELECT
-    s.status,
-    SUM(b.amount) AS revenue
-FROM billing_transactions b
-JOIN latest_status s
-  ON s.customer_id = b.customer_id
-WHERE b.status = 'success'
-GROUP BY s.status;
-```
-
-Bài học: **fix join fan-out bằng cách sửa relation/grain**, không phải thêm `DISTINCT` ở cuối.
-
----
-
-## 5. Hands-on lab
-
-Tạo `lesson-04.sql`.
-
-### Part A – Join behavior
-
-1. `customers INNER JOIN billing_transactions`: row count bao nhiêu?
-2. `customers LEFT JOIN billing_transactions`: customer nào không có transaction?
-3. Chứng minh unmatched row có right-side columns NULL.
-4. `billing_transactions JOIN customers`: chứng minh row count không đổi nếu mọi FK match và right key unique.
-5. Join `billing_transactions` với `customer_status_history` chỉ theo `customer_id`; đo fan-out factor:
-
-```text
-joined_row_count / base_fact_row_count
-```
-
-### Part B – Cardinality validation
-
-Viết query kiểm tra:
-
-```sql
-GROUP BY key
-HAVING COUNT(*) > 1
-```
-
-cho:
-
-- `customers.customer_id`;
-- `plans.plan_id`;
-- `network_events.event_id`;
-- `customer_status_history.customer_id`.
-
-Giải thích tại sao duplicate có nghĩa khác nhau ở từng bảng.
-
-### Part C – Semi/anti join
-
-1. Customer có ít nhất một successful transaction.
-2. Customer không có successful transaction.
-3. Tower chưa có `call_drop`.
-4. Province có customer nhưng chưa phát sinh successful revenue.
-
-### Part D – Set operations
-
-1. Tạo hai tập customer: `Ha Noi` và `HCM`; nối bằng `UNION ALL`.
-2. Tạo hai tập: customer có successful payment và customer có active subscription; tìm giao bằng `INTERSECT`.
-3. Tìm active subscription customer nhưng chưa successful payment bằng `EXCEPT` hoặc `NOT EXISTS`.
-4. So sánh `UNION` vs `UNION ALL` khi hai sets overlap.
-
-### Challenge – temporal join reasoning
-
-Không cần code hoàn chỉnh SCD. Hãy viết pseudo-SQL join transaction với status có hiệu lực tại `transaction_ts`:
+Nếu cần status có hiệu lực tại transaction time:
 
 ```text
 b.customer_id = h.customer_id
 AND b.transaction_ts >= h.effective_from
-AND b.transaction_ts < next_effective_from
+AND b.transaction_ts < h.effective_to
 ```
 
-Giải thích vì sao chỉ equality key chưa đủ.
+Nếu `effective_to` chưa tồn tại, có thể derive bằng `LEAD` ở Lesson 06/07.
+
+### 4.9 Set operations
+
+Databricks hỗ trợ:
+
+```text
+UNION [ALL | DISTINCT]
+INTERSECT [ALL | DISTINCT]
+EXCEPT [ALL | DISTINCT]
+```
+
+`UNION` mặc định DISTINCT semantics.
+
+`UNION ALL` giữ duplicate rows.
+
+Hai sides cần cùng số columns và compatible/least-common types.
+
+Pipeline rule:
+
+> Khi ghép partitions/batches, `UNION ALL` thường phản ánh raw semantics tốt hơn; dedup nên là explicit business step.
 
 ---
 
-## 6. Knowledge check – MCQ
+## 5. Worked example – Customers without successful payment
 
-**Q1.** Join fact N rows với dimension unique key 1 row/key thường giữ grain nào?  
-A. Fact grain; B. Dimension grain; C. random; D. Cartesian.
+### Version A – LEFT ANTI JOIN
 
-**Q2.** Fan-out xảy ra khi:  
-A. một left row match nhiều right rows ngoài intent; B. dùng alias; C. SUM NULL; D. ORDER BY.
+```sql
+SELECT c.customer_id, c.full_name, c.province
+FROM customers c
+LEFT ANTI JOIN billing_transactions b
+  ON b.customer_id = c.customer_id
+ AND b.status = 'success';
+```
 
-**Q3.** Nếu chỉ cần biết “có tồn tại transaction không”, pattern tự nhiên là:  
-A. CROSS JOIN; B. EXISTS; C. FULL JOIN bắt buộc; D. DISTINCT *.
+### Version B – NOT EXISTS
 
-**Q4.** `UNION ALL`:  
-A. loại duplicate; B. giữ duplicate; C. chỉ numeric; D. join bằng key.
+```sql
+SELECT c.customer_id, c.full_name, c.province
+FROM customers c
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM billing_transactions b
+  WHERE b.customer_id = c.customer_id
+    AND b.status = 'success'
+);
+```
 
-**Q5.** Fix đúng cho fact join history bị multiply là:  
-A. luôn `SELECT DISTINCT`; B. tạo relation history đúng grain/temporal condition trước join; C. tăng LIMIT; D. ORDER BY.
+### Reasoning
 
-**Q6.** `LEFT JOIN` biểu diễn intent:  
-A. chỉ giữ match; B. preserve rows phía trái; C. Cartesian; D. aggregate.
+Cả hai nói về **absence of match**.
+
+Không cần:
+
+```sql
+LEFT JOIN ...
+WHERE b.customer_id IS NULL
+```
+
+mặc dù pattern đó cũng có thể đúng nếu viết cẩn thận.
+
+### Validation
+
+Output grain phải vẫn là 1 row/customer nếu input customers unique.
 
 ---
 
-## 7. Knowledge check – Tự luận / Interview
+## 6. Hands-on lab
 
-1. Phân biệt 1:N và N:1 từ góc nhìn query direction.
-2. Tại sao join fan-out nguy hiểm hơn syntax error?
-3. Semi-join là gì? Khi nào `EXISTS` rõ nghĩa hơn join + DISTINCT?
-4. `UNION` vs `UNION ALL`: khi nào duplicate removal là bug?
-5. Temporal join cần thêm thông tin gì ngoài entity key?
-6. Cách debug một dashboard revenue đột nhiên tăng gấp 3 sau khi thêm dimension customer status?
-7. Bạn kiểm tra missing foreign keys bằng SQL thế nào?
+### Part A – Cardinality
+
+1. `billing_transactions JOIN customers`: dự đoán và đo row count.
+2. `customers LEFT JOIN billing_transactions`: customer nào không transaction?
+3. Join billing → status history chỉ equality key; đo fan-out factor.
+4. Viết uniqueness checks cho right-side keys trước joins.
+
+### Part B – Semi/anti joins
+
+5. Customer có successful transaction bằng `LEFT SEMI JOIN`.
+6. Viết cùng bài bằng `EXISTS`; so outputs.
+7. Customer không successful transaction bằng `LEFT ANTI JOIN`.
+8. Viết cùng bài bằng `NOT EXISTS`; so outputs.
+9. Tower có event nhưng chưa `call_drop` bằng anti join/existence reasoning.
+
+### Part C – Set operations
+
+10. Ghép Ha Noi + HCM customer sets bằng `UNION ALL`.
+11. Tạo overlapping sets rồi so `UNION` vs `UNION ALL`.
+12. Customers vừa có successful payment vừa có active subscription bằng `INTERSECT`.
+13. Active subscription customers chưa successful payment bằng `EXCEPT` và bằng ANTI JOIN.
+
+### Part D – Exploding join
+
+14. Tạo intentionally exploding join với `customer_status_history`.
+15. Nếu chạy trên Databricks SQL warehouse/serverless, mở Query Profile và ghi:
+
+```text
+input rows
+output rows
+join operator
+rows amplification
+```
+
+### Challenge – point-in-time reasoning
+
+Viết pseudo/partial SQL để join mỗi billing transaction vào status có hiệu lực tại `transaction_ts`. Giải thích cách ngăn một fact match hai overlapping history windows.
 
 ---
 
-## 8. Exit criteria
+## 7. Knowledge check – MCQ
 
-- [ ] Với mỗi join lab, ghi được expected cardinality trước khi chạy.
-- [ ] Tự tạo và đo fan-out factor.
-- [ ] Dùng được `EXISTS` và `NOT EXISTS`.
-- [ ] Phân biệt `UNION`/`UNION ALL` không nhầm.
-- [ ] Giải thích temporal join concept.
-- [ ] Đạt ít nhất 5/6 MCQ.
+**Q1.** Fact N:1 dimension unique join thường:  
+A. preserve fact grain; B. change to dimension grain; C. Cartesian; D. dedup.
+
+**Q2.** `LEFT SEMI JOIN` trả:  
+A. columns từ cả hai sides; B. left rows có match; C. only right rows; D. unmatched left rows.
+
+**Q3.** `LEFT ANTI JOIN` trả:  
+A. matched pairs; B. left rows không match; C. right rows; D. intersection.
+
+**Q4.** Join history nhiều row/entity chỉ bằng entity key có risk:  
+A. fan-out; B. automatic SCD; C. type promotion; D. time travel.
+
+**Q5.** `UNION ALL`:  
+A. loại duplicate; B. giữ duplicate; C. anti join; D. aggregate.
+
+**Q6.** Databricks `UNION` mặc định:  
+A. ALL; B. DISTINCT-style duplicate removal; C. CROSS; D. LEFT SEMI.
+
+**Q7.** Query Profile cảnh báo exploding join nên được hiểu đầu tiên là:  
+A. chỉ performance, không correctness; B. kiểm tra cardinality/business semantics trước; C. add index; D. use DISTINCT.
+
+---
+
+## 8. Tự luận / Interview
+
+1. Semi join khác inner join về output semantics thế nào?
+2. Anti join và `NOT EXISTS` diễn đạt cùng loại câu hỏi nào?
+3. Vì sao exploding join có thể làm KPI sai?
+4. Temporal join cần gì ngoài business key?
+5. `UNION` vs `UNION ALL`: duplicate removal khi nào là bug?
+6. Cách kiểm tra orphan foreign/business key trong analytical table?
+7. Nếu Query Profile thấy join output gấp 100x input, bạn debug gì trước?
+
+---
+
+## 9. Exit criteria
+
+- [ ] Dự đoán cardinality trước mọi join lab.
+- [ ] Dùng được LEFT SEMI và LEFT ANTI JOIN.
+- [ ] Dùng được EXISTS/NOT EXISTS tương đương intent.
+- [ ] Đo được fan-out factor.
+- [ ] Phân biệt UNION/UNION ALL/INTERSECT/EXCEPT.
+- [ ] Giải thích temporal join.
+- [ ] Đạt >=6/7 MCQ.

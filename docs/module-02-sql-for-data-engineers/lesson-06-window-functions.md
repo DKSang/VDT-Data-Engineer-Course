@@ -1,101 +1,139 @@
-# Lesson 06 – Window Functions: Ranking, Running Metrics & Row Context
+# Lesson 06 – Window Functions & QUALIFY on Databricks
 
 ## 1. Learning objectives
 
 Sau bài này, bạn phải có thể:
 
-- Giải thích khác nhau giữa aggregation và window calculation.
-- Dùng `PARTITION BY` và `ORDER BY` đúng semantics.
+- Phân biệt aggregation và window calculation theo output grain.
+- Dùng `PARTITION BY`, `ORDER BY`, window frame.
 - Phân biệt `ROW_NUMBER`, `RANK`, `DENSE_RANK`.
-- Dùng `LAG`/`LEAD` để so sánh row hiện tại với row trước/sau.
-- Tạo running total và moving-style metrics bằng window aggregate.
-- Giải thích window frame và vì sao default frame đôi khi gây surprise.
-- Dùng subquery/CTE để filter theo kết quả window function.
+- Dùng `LAG`/`LEAD` cho previous/next state.
+- Tạo running/cumulative metrics.
+- Dùng Databricks **`QUALIFY`** để filter window results.
+- Viết deterministic latest-row/dedup candidate với tie-breaker rõ.
+- Nhận biết named `WINDOW` clause ở mức thực dụng.
 
 ---
 
-## 2. Principles
+## 2. Source alignment
 
-### Principle 1 – Window functions preserve row identity
+### Primary Databricks sources
 
-`GROUP BY` làm nhiều rows co lại thành một row/group.
+- Window Functions  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-window-functions
+- QUALIFY  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-qualify
+- SELECT / WINDOW clause  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select
 
-Window function tính toán trên một tập rows liên quan nhưng vẫn giữ từng row trong output.
+### Databricks-specific point
 
-Ví dụ:
+`QUALIFY` filter trực tiếp results của window functions. Đây là syntax quan trọng cần biết khi viết Databricks SQL; portable CTE/subquery pattern vẫn hữu ích khi chuyển engine.
+
+---
+
+## 3. Principles
+
+### Principle 1 – Window preserves row identity
+
+`GROUP BY`:
 
 ```text
-Transaction rows vẫn còn nguyên
-+ thêm revenue rank/customer running total/daily comparison
+many transaction rows → 1 row/customer
 ```
 
-### Principle 2 – Partition defines peer universe; order defines sequence
+Window:
 
-`PARTITION BY customer_id` trả lời “tính riêng cho từng customer”.
+```text
+transaction rows remain
++ per-customer rank/total/previous value
+```
 
-`ORDER BY transaction_ts` trả lời “thứ tự thời gian trong customer đó”.
+### Principle 2 – Partition defines group context; order defines sequence
 
-Nếu thiếu tie-breaker trong `ORDER BY`, kết quả như `ROW_NUMBER` có thể không deterministic khi nhiều rows có cùng sort key.
+```sql
+PARTITION BY customer_id
+ORDER BY transaction_ts
+```
 
-### Principle 3 – Ranking function must match business tie semantics
+nghĩa là:
 
-- `ROW_NUMBER`: mỗi row nhận số thứ tự riêng.
-- `RANK`: ties cùng rank, rank sau bị gap.
-- `DENSE_RANK`: ties cùng rank, không gap.
+> sequence riêng trong từng customer theo transaction time.
 
-Không có function “tốt nhất”; có business semantics phù hợp hay không.
+### Principle 3 – Tie semantics are business semantics
 
-### Principle 4 – Understand the frame, not only the partition
+- `ROW_NUMBER`: unique ordinal.
+- `RANK`: ties same rank + gaps.
+- `DENSE_RANK`: ties same rank, no gaps.
 
-Với window aggregate có `ORDER BY`, frame quyết định rows nào được đưa vào calculation cho current row.
+Nếu requirement là “tối đa 2 rows/customer”, `ROW_NUMBER` thường phù hợp hơn `RANK` khi ties có thể tạo >2 rows.
 
-Running sum khác whole-partition sum dù `PARTITION BY` giống nhau.
+### Principle 4 – Determinism needs a complete ordering rule
+
+```sql
+ORDER BY effective_from DESC
+```
+
+không đủ nếu two rows cùng `effective_from`.
+
+Cần business-valid tie-breaker:
+
+```text
+effective_from DESC
+recorded_at DESC
+status_history_id DESC
+```
+
+### Principle 5 – Frame controls window aggregate population
+
+`PARTITION BY` chưa đủ để hiểu running total.
+
+Window frame nói rows nào trong partition tham gia current-row calculation.
 
 ---
 
-## 3. Fundamentals
+## 4. Fundamentals
 
-### 3.1 Aggregate vs window
+### 4.1 Aggregate vs window
 
 Aggregate:
 
 ```sql
-SELECT customer_id, SUM(amount)
+SELECT customer_id, SUM(amount) AS revenue
 FROM billing_transactions
 GROUP BY customer_id;
 ```
-
-Output grain: 1 row/customer.
 
 Window:
 
 ```sql
 SELECT
-    transaction_id,
-    customer_id,
-    amount,
-    SUM(amount) OVER (PARTITION BY customer_id) AS customer_total
+  transaction_id,
+  customer_id,
+  amount,
+  SUM(amount) OVER (PARTITION BY customer_id) AS customer_total
 FROM billing_transactions;
 ```
 
-Output grain vẫn 1 row/transaction.
-
-### 3.2 `ROW_NUMBER`
+### 4.2 ROW_NUMBER
 
 ```sql
 ROW_NUMBER() OVER (
-    PARTITION BY customer_id
-    ORDER BY effective_from DESC, recorded_at DESC, status_history_id DESC
+  PARTITION BY customer_id
+  ORDER BY effective_from DESC, recorded_at DESC, status_history_id DESC
 )
 ```
 
-Pattern quan trọng để chọn một row/customer.
+Core DE use cases:
 
-Tie-breaker giúp ordering deterministic.
+- latest row/entity;
+- deterministic dedup winner;
+- top-N per group;
+- version selection.
 
-### 3.3 `RANK` vs `DENSE_RANK`
+### 4.3 RANK / DENSE_RANK
 
-Giả sử scores:
+Values:
 
 ```text
 100, 100, 90
@@ -113,204 +151,233 @@ Giả sử scores:
 1, 1, 2
 ```
 
-### 3.4 `LAG` và `LEAD`
+### 4.4 LAG / LEAD
 
 ```sql
 LAG(revenue) OVER (ORDER BY revenue_date)
+LEAD(effective_from) OVER (PARTITION BY customer_id ORDER BY effective_from)
 ```
-
-Lấy value của row trước trong ordering.
 
 Use cases:
 
-- day-over-day change;
+- day-over-day;
 - previous status;
-- time gap between events;
-- detect state transition.
+- derive `effective_to`;
+- gap/session reasoning;
+- detect changes.
 
-### 3.5 Running total
+### 4.5 Window aggregate + frame
 
 ```sql
 SUM(daily_revenue) OVER (
-    ORDER BY revenue_date
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-)
+  ORDER BY revenue_date
+  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+) AS cumulative_revenue
 ```
 
-Viết frame rõ giúp reader hiểu intent.
+Course rule:
 
-### 3.6 Window frame
+> Với cumulative/moving metric quan trọng, viết frame explicit để intent review được.
 
-Các khái niệm chính:
+### 4.6 Databricks QUALIFY
 
-- `ROWS` – frame theo physical rows trong ordering;
-- `RANGE` – frame dựa trên peer/value semantics;
-- `UNBOUNDED PRECEDING`;
-- `CURRENT ROW`;
-- `UNBOUNDED FOLLOWING`.
-
-Không cần học thuộc mọi biến thể ngay. Nhưng phải biết `ORDER BY` trong window có thể làm aggregate trở thành running calculation thay vì whole partition.
-
-### 3.7 Filter window result
-
-Window functions logically được tính sau `WHERE`, nên pattern phổ biến:
+Portable form:
 
 ```sql
 WITH ranked AS (
-    SELECT
-        ...,
-        ROW_NUMBER() OVER (...) AS rn
-    FROM ...
+  SELECT
+    h.*,
+    ROW_NUMBER() OVER (...) AS rn
+  FROM customer_status_history h
 )
 SELECT *
 FROM ranked
 WHERE rn = 1;
 ```
 
-Một số engines có `QUALIFY`, PostgreSQL không dùng `QUALIFY` trong core syntax; CTE/subquery là portable pattern hơn.
+Databricks-native form:
+
+```sql
+SELECT
+  h.*
+FROM customer_status_history h
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY customer_id
+  ORDER BY effective_from DESC, recorded_at DESC, status_history_id DESC
+) = 1;
+```
+
+Hoặc alias window expression trong `SELECT` rồi reference alias trong `QUALIFY` nếu query form cho phép.
+
+`QUALIFY` yêu cầu có ít nhất một window function trong SELECT list hoặc QUALIFY condition.
+
+### 4.7 QUALIFY is not HAVING
+
+```text
+HAVING  → filter grouped aggregate result
+QUALIFY → filter window-function result
+```
+
+Đây là distinction rất dễ hỏi khi interview SQL trên analytical engine.
+
+### 4.8 Named WINDOW clause awareness
+
+Khi nhiều expressions reuse cùng partition/order spec, named window có thể giảm lặp.
+
+Concept:
+
+```sql
+SELECT
+  ...,
+  LAG(amount) OVER w,
+  SUM(amount) OVER w
+FROM ...
+WINDOW w AS (PARTITION BY customer_id ORDER BY transaction_ts);
+```
+
+Không bắt buộc dùng nếu làm query khó đọc hơn.
 
 ---
 
-## 4. Worked example – Latest customer status
+## 5. Worked example – Latest customer status bằng QUALIFY
 
-### Problem
+### Requirement
 
-`customer_status_history` có nhiều row/customer. Cần relation:
+Relation output:
 
 ```text
-latest_customer_status
-Grain: 1 row/customer
+Grain: 1 row / customer
+Winner: latest effective_from
+Tie 1: latest recorded_at
+Tie 2: greatest status_history_id
 ```
-
-Query:
 
 ```sql
-WITH ranked_status AS (
-    SELECT
-        status_history_id,
-        customer_id,
-        status,
-        effective_from,
-        recorded_at,
-        ROW_NUMBER() OVER (
-            PARTITION BY customer_id
-            ORDER BY
-                effective_from DESC,
-                recorded_at DESC,
-                status_history_id DESC
-        ) AS rn
-    FROM customer_status_history
-)
 SELECT
-    customer_id,
-    status,
-    effective_from,
-    recorded_at
-FROM ranked_status
-WHERE rn = 1;
+  customer_id,
+  status,
+  effective_from,
+  recorded_at
+FROM customer_status_history
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY customer_id
+  ORDER BY
+    effective_from DESC,
+    recorded_at DESC,
+    status_history_id DESC
+) = 1;
 ```
-
-### Why multiple tie-breakers?
-
-Nếu source có hai status cùng `effective_from`, chỉ sort theo `effective_from` không đủ để chọn deterministic row.
-
-`recorded_at` và technical id giúp đặt rule rõ hơn. Tuy nhiên business phải xác nhận tie-breaker thực sự đúng semantics; technical ordering không thay thế data contract.
 
 ### Validation
 
 ```sql
-WITH latest AS (...)
-SELECT customer_id, COUNT(*)
+WITH latest AS (
+  SELECT
+    customer_id,
+    status,
+    effective_from,
+    recorded_at
+  FROM customer_status_history
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY customer_id
+    ORDER BY effective_from DESC, recorded_at DESC, status_history_id DESC
+  ) = 1
+)
+SELECT customer_id, COUNT(*) AS n
 FROM latest
 GROUP BY customer_id
 HAVING COUNT(*) > 1;
 ```
 
-Kỳ vọng 0 rows.
+Expected: 0 rows.
 
 ---
 
-## 5. Hands-on lab
-
-Tạo `lesson-06.sql`.
+## 6. Hands-on lab
 
 ### Part A – Ranking
 
-1. Rank successful transactions theo amount toàn hệ thống bằng `RANK`.
-2. Rank transaction trong từng customer bằng `ROW_NUMBER`.
-3. Top 2 successful transactions/customer.
-4. Top 2 towers theo số drop events; so sánh `RANK` và `DENSE_RANK` khi tie.
+1. Rank successful transactions by amount globally bằng `RANK`.
+2. `ROW_NUMBER` transaction trong từng customer.
+3. Top 2 successful transactions/customer bằng `QUALIFY`.
+4. Top towers/drop-count với `RANK` vs `DENSE_RANK`.
 
 ### Part B – Latest row
 
-1. Latest customer status/customer.
-2. Latest subscription/customer theo `updated_at`, có tie-breaker.
-3. Latest ingested version/event_id từ `network_events`.
-
-Chưa gọi bước 3 là “dedup chuẩn” cho đến khi bạn định nghĩa business tie-breaker ở Lesson 07.
+5. Latest status/customer bằng CTE form.
+6. Viết lại bằng `QUALIFY`.
+7. Latest subscription/customer.
+8. Latest ingested version/event_id.
+9. Với mỗi bài, thêm deterministic tie-breaker.
 
 ### Part C – LAG/LEAD
 
-1. Daily successful revenue.
-2. Thêm previous-day revenue bằng `LAG`.
-3. Tính absolute và percentage day-over-day change.
-4. Với mỗi customer status row, dùng `LAG(status)` để tìm previous status.
-5. Tính thời gian giữa hai status changes.
+10. Daily revenue + previous-day revenue.
+11. Absolute / percentage day-over-day change.
+12. Previous customer status bằng `LAG`.
+13. Derive `effective_to` bằng `LEAD(effective_from)`.
+14. Tìm time gap giữa status changes.
 
-### Part D – Window aggregates
+### Part D – Window aggregate
 
-1. Cumulative successful revenue theo ngày.
-2. Cumulative revenue riêng từng province.
-3. Với mỗi transaction, hiển thị customer total và % contribution của transaction vào customer total.
+15. Cumulative successful revenue/day.
+16. Cumulative revenue/province.
+17. Transaction contribution % vào customer total.
 
-### Challenge – session-like gap reasoning
+### Part E – Databricks-specific
 
-Với `network_events`, dùng `LAG(event_ts)` theo `customer_id` để tính gap giữa events. Đánh dấu `new_session = 1` nếu gap > 30 phút.
+18. Viết một query dùng `HAVING` và một query dùng `QUALIFY`; giải thích population được filter ở hai stage khác nhau.
+19. Nếu convenient, thử named `WINDOW` để reuse same partition/order spec.
 
-Chưa cần tạo session_id hoàn chỉnh; mục tiêu là hiểu state dựa trên previous row.
+### Challenge – session boundary
 
----
-
-## 6. Knowledge check – MCQ
-
-**Q1.** Window function khác GROUP BY ở điểm quan trọng nào?  
-A. Window luôn nhanh hơn; B. window giữ row identity; C. window không có ORDER BY; D. GROUP BY không aggregate.
-
-**Q2.** `ROW_NUMBER` với ties:  
-A. cùng số; B. vẫn gán số riêng theo ordering; C. luôn NULL; D. lỗi syntax.
-
-**Q3.** `RANK` cho values `100,100,90`:  
-A. `1,1,2`; B. `1,2,3`; C. `1,1,3`; D. `0,0,1`.
-
-**Q4.** `LAG` thường dùng để:  
-A. lấy row/value trước theo window ordering; B. join table; C. create index; D. delete rows.
-
-**Q5.** Filter `rn = 1` từ `ROW_NUMBER` trong PostgreSQL portable pattern thường cần:  
-A. CTE/subquery ngoài; B. WHERE cùng level luôn; C. GROUP BY; D. index bắt buộc.
-
-**Q6.** Nếu `ROW_NUMBER ORDER BY effective_from DESC` có ties và không tie-breaker:  
-A. luôn deterministic; B. row được chọn có thể không ổn định theo intent; C. tự dedup source; D. DB thêm business key.
+Với `network_events`, dùng `LAG(event_ts)` theo customer, đánh dấu `new_session = 1` nếu gap > 30 phút.
 
 ---
 
-## 7. Knowledge check – Tự luận / Interview
+## 7. Knowledge check – MCQ
 
-1. `GROUP BY` vs window function khác nhau ở grain output thế nào?
-2. Khi nào chọn `ROW_NUMBER` thay vì `RANK`?
-3. Vì sao top-N per group là bài window function điển hình?
-4. Window frame là gì? Running total khác partition total thế nào?
-5. Tại sao tie-breaker quan trọng trong dedup/latest-row?
-6. Dùng `LAG` để phát hiện status transition như thế nào?
-7. Nếu interviewer hỏi “latest row/customer”, hãy trình bày reasoning trước khi viết query.
+**Q1.** Window function thường:  
+A. collapse rows; B. preserve row identity; C. delete rows; D. create table.
+
+**Q2.** `QUALIFY` trong Databricks filter:  
+A. window results; B. pre-FROM rows; C. table history; D. Delta versions.
+
+**Q3.** `HAVING` chủ yếu filter:  
+A. window output; B. grouped aggregate result; C. input files; D. join hints.
+
+**Q4.** `ROW_NUMBER` với ties:  
+A. same number; B. unique ordinal according to ordering; C. null; D. syntax error.
+
+**Q5.** `RANK` for 100,100,90:  
+A. 1,1,2; B. 1,1,3; C. 1,2,3; D. 0,0,1.
+
+**Q6.** Latest-row tie-breaker cần để:  
+A. deterministic/business-defined winner; B. Photon on; C. cluster table; D. SUM faster.
+
+**Q7.** Running total phụ thuộc thêm vào:  
+A. window frame; B. only GROUP BY; C. MERGE; D. ANTI JOIN.
 
 ---
 
-## 8. Exit criteria
+## 8. Tự luận / Interview
 
-- [ ] Phân biệt rõ aggregate và window grain.
+1. `GROUP BY` vs window khác nhau ở grain thế nào?
+2. `HAVING` vs `QUALIFY`.
+3. Vì sao QUALIFY giúp latest-row query ngắn hơn?
+4. `ROW_NUMBER` vs `RANK`: tie semantics.
+5. Vì sao ordering không đầy đủ làm dedup nondeterministic?
+6. Window frame là gì?
+7. `LEAD` hỗ trợ SCD/history reasoning như thế nào?
+
+---
+
+## 9. Exit criteria
+
 - [ ] Dùng đúng ROW_NUMBER/RANK/DENSE_RANK.
-- [ ] Viết latest-status relation 1 row/customer.
-- [ ] Dùng LAG cho day-over-day và status transition.
-- [ ] Viết running total với frame explicit.
-- [ ] Giải thích deterministic ordering/tie-breaker.
-- [ ] Đạt ít nhất 5/6 MCQ.
+- [ ] Viết latest-row bằng QUALIFY.
+- [ ] Phân biệt HAVING/QUALIFY.
+- [ ] Dùng LAG/LEAD.
+- [ ] Viết running total frame explicit.
+- [ ] Giải thích deterministic ordering.
+- [ ] Đạt >=6/7 MCQ.

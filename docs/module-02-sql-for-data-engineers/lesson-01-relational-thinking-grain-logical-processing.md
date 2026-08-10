@@ -1,134 +1,180 @@
-# Lesson 01 – Relational Thinking, Grain & Logical Query Processing
+# Lesson 01 – Relational Thinking, Grain & Databricks Query Semantics
 
 ## 1. Learning objectives
 
 Sau bài này, bạn phải có thể:
 
-- Giải thích table/relation, row/tuple, column/attribute theo cách hữu ích cho Data Engineering.
-- Xác định **grain** của bảng và grain của output trước khi viết query.
-- Phân biệt primary key, candidate key, business key và foreign key.
-- Dự đoán tác động của duplicate và key không unique lên kết quả downstream.
-- Giải thích logical query processing order và dùng nó để debug SQL.
-- Viết query có validation check thay vì chỉ nhìn vài row đầu rồi kết luận đúng.
+- Xác định grain, business key và expected uniqueness của một table/query result.
+- Reasoning query như chuỗi relations, không như chuỗi text SQL.
+- Phân biệt **logical reasoning order** với **physical execution plan**.
+- Đọc cấu trúc `Query` / `SELECT` của Databricks SQL.
+- Dự đoán join/aggregate có preserve hay thay đổi grain.
+- Viết validation query cho uniqueness, row count và reconciliation.
+- Biết khi nào `SELECT *` / `* EXCEPT (...)` phù hợp trong Databricks.
 
 ---
 
-## 2. Principles
+## 2. Source alignment
+
+### Primary Databricks sources
+
+- SQL Language Reference  
+  https://docs.databricks.com/aws/en/sql/language-manual
+- Query  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-query
+- SELECT (subselect)  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select
+- SELECT clause / star clause  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-column-list
+
+### Scope note
+
+Databricks docs định nghĩa syntax/semantics. Khái niệm **grain** là Data Engineering reasoning layer mà course thêm vào để kiểm tra correctness trước khi dùng Spark/Delta/Lakeflow.
+
+---
+
+## 3. Principles
 
 ### Principle 1 – Grain before query
 
-Trước khi viết SQL, hãy hoàn thành câu:
+Trước khi code, hoàn thành câu:
 
-> Mỗi row của output đại diện cho ______.
+> Mỗi row của relation này đại diện cho ______.
 
 Ví dụ:
 
-- 1 row / customer;
-- 1 row / province / day;
-- 1 row / tower / 5-minute window;
-- 1 row / billing transaction.
+```text
+customers             → 1 row / customer
+billing_transactions  → 1 row / transaction
+network_events raw    → 1 row / ingested event version
+Gold revenue          → 1 row / date / province
+```
 
-Nếu không nói được grain, bạn chưa đủ thông tin để biết `GROUP BY`, `JOIN` hay dedup có đúng hay không.
+Nếu không nói được grain, bạn chưa thể chứng minh `JOIN`, `GROUP BY` hay dedup là đúng.
 
-### Principle 2 – SQL transforms relations, not files
+### Principle 2 – A query creates relations
 
-Hãy nghĩ query như chuỗi biến đổi các relation trung gian. Mỗi bước có:
+Hãy nghĩ:
 
-- schema;
-- grain;
-- row count/cardinality;
-- key kỳ vọng.
+```text
+source relation
+   ↓ filter
+filtered relation
+   ↓ join
+joined relation
+   ↓ aggregate/window
+serving relation
+```
 
-Tư duy này quan trọng hơn việc viết query ngắn.
+Mỗi relation trung gian có:
 
-### Principle 3 – Uniqueness is a data contract
+```text
+schema
+row meaning / grain
+key
+expected row count
+quality assumptions
+```
 
-Một cột có tên `customer_id` không có nghĩa nó tự động unique. Uniqueness phải đến từ constraint hoặc được kiểm chứng.
+### Principle 3 – Logical SQL semantics != physical execution
 
-Khi join với bảng mà key phía bên phải không unique, row phía trái có thể bị nhân lên.
+Ta có thể reasoning logic gần với:
 
-### Principle 4 – Correctness must be testable
+```text
+FROM / JOIN
+→ WHERE
+→ GROUP BY / aggregate
+→ HAVING
+→ window calculation
+→ QUALIFY
+→ SELECT / DISTINCT
+→ ORDER BY / LIMIT
+```
 
-Một query đáng tin phải có cách kiểm tra:
+Nhưng Databricks optimizer có thể tạo physical plan khác để thực thi hiệu quả hơn.
 
-- expected row count;
-- uniqueness;
-- null rate;
-- reconciliation total;
-- anti-join để tìm missing keys.
+Không dùng “logical order” để đoán physical operator. Muốn biết physical plan → Lesson 08: `EXPLAIN` + Query Profile.
+
+### Principle 4 – Uniqueness is an assumption until proven
+
+Tên `customer_id` không làm cột tự unique.
+
+Trong analytical/Delta workloads, correctness phải được bảo vệ bằng:
+
+- data contract;
+- validation query;
+- constraint nếu environment hỗ trợ và semantics phù hợp;
+- quality checks trong pipeline.
+
+### Principle 5 – Select only what the contract needs
+
+Databricks SQL hỗ trợ `*` và `* EXCEPT (...)`, nhưng production pipeline vẫn cần schema intent rõ.
+
+`SELECT *` có thể kéo thêm column mới, PII hoặc payload lớn khi source schema thay đổi.
 
 ---
 
-## 3. Fundamentals
+## 4. Fundamentals
 
-### 3.1 Relation và row
+### 4.1 Relation / row / attribute
 
-Trong thực hành, table là một representation của relation. Ta quan tâm:
+Thực dụng cho DE:
 
-- **columns** mô tả thuộc tính;
-- **rows** mô tả các bản ghi ở một grain;
-- **keys** giúp nhận diện/ghép record;
-- **constraints** bảo vệ assumptions.
+- **relation/table result**: tập rows có schema;
+- **row**: một observation ở một grain;
+- **column**: attribute/expression;
+- **key**: tập column nhận diện entity/event/version theo semantics.
 
-SQL result cũng là một relation tạm thời mà query tiếp theo có thể sử dụng.
+SQL query cũng tạo một relation mà CTE/query khác có thể dùng.
 
-### 3.2 Grain
+### 4.2 Key taxonomy
 
-Ví dụ bảng `billing_transactions`:
+**Business key**
 
-```text
-transaction_id | customer_id | transaction_ts | amount
-```
-
-Grain:
-
-> 1 row / billing transaction.
-
-Nếu muốn doanh thu theo customer, output grain chuyển thành:
-
-> 1 row / customer.
-
-Do đó cần aggregation.
-
-```sql
-SELECT customer_id, SUM(amount) AS revenue
-FROM billing_transactions
-WHERE status = 'success'
-GROUP BY customer_id;
-```
-
-### 3.3 Keys
-
-**Primary key:** key được database enforce để nhận diện row.
-
-**Candidate key:** một tập column có thể unique về mặt logic.
-
-**Business/natural key:** key đến từ nghiệp vụ, ví dụ `event_id` do upstream sinh.
-
-**Surrogate key:** key kỹ thuật do hệ thống sinh, ví dụ `ingest_row_id`.
-
-**Foreign key:** ràng buộc quan hệ giữa child và parent.
-
-Trong `network_events`, `ingest_row_id` là primary key nhưng `event_id` mới là business identifier cần dùng cho dedup.
-
-### 3.4 Cardinality
-
-Các quan hệ thường gặp:
+Đến từ nghiệp vụ:
 
 ```text
-1:1
-1:N
-N:1
-N:M
+customer_id
+transaction_id
+event_id
 ```
 
-`customers → billing_transactions` là 1:N.
+**Surrogate/technical key**
 
-Nếu join customer với transaction, output grain không còn 1 row/customer mà gần với 1 row/transaction có customer attributes.
+Do platform/pipeline sinh:
 
-### 3.5 Logical query processing
+```text
+ingest_row_id
+customer_sk
+```
 
-SQL được **viết** thường theo thứ tự:
+**Composite key**
+
+Nhiều fields cùng xác định grain:
+
+```text
+(revenue_date, province)
+(customer_id, effective_from)
+```
+
+### 4.3 Grain-changing operators
+
+`WHERE` thường preserve grain của rows còn lại.
+
+`JOIN` có thể:
+
+- preserve left/fact grain;
+- remove rows;
+- fan-out rows;
+- tạo Cartesian explosion.
+
+`GROUP BY` đổi grain.
+
+Window function thường preserve row identity.
+
+### 4.4 Databricks query structure
+
+Databricks `SELECT` có thể gồm:
 
 ```sql
 SELECT ...
@@ -136,176 +182,210 @@ FROM ...
 WHERE ...
 GROUP BY ...
 HAVING ...
-ORDER BY ...
+QUALIFY ...
 ```
 
-Nhưng để reasoning, hãy nghĩ gần với thứ tự logic:
+Toàn `Query` còn có thể chứa:
 
 ```text
-FROM / JOIN
-   ↓
-WHERE
-   ↓
-GROUP BY + aggregate
-   ↓
-HAVING
-   ↓
-SELECT
-   ↓
-DISTINCT
-   ↓
+CTE
+set operators
 ORDER BY
-   ↓
-LIMIT/FETCH
+WINDOW
+LIMIT / OFFSET
+SQL Pipeline Syntax
 ```
 
-Window functions được tính sau `WHERE/GROUP BY/HAVING` và trước final ordering, nên không thể thông thường dùng alias window trực tiếp trong `WHERE` cùng query level; ta cần subquery/CTE.
+Module này tập trung classic query syntax; SQL Pipeline Syntax chỉ awareness.
 
-### 3.6 `SELECT *` và schema drift
+### 4.5 Star projection
 
-`SELECT *` hữu ích khi khám phá dữ liệu, nhưng production pipeline nên chọn column rõ ràng khi schema contract quan trọng.
+Exploration:
 
-Nếu upstream thêm một column cực lớn hoặc nhạy cảm, `SELECT *` có thể làm thay đổi cost, schema output hoặc security exposure mà code không thể hiện intent.
+```sql
+SELECT *
+FROM customers;
+```
+
+Databricks cho phép loại bớt field khỏi star projection:
+
+```sql
+SELECT * EXCEPT (email)
+FROM customers;
+```
+
+Nhưng trong production Gold interface, explicit columns thường làm data contract dễ review hơn.
+
+### 4.6 Validation patterns
+
+**Uniqueness**
+
+```sql
+SELECT customer_id, COUNT(*) AS n
+FROM customers
+GROUP BY customer_id
+HAVING COUNT(*) > 1;
+```
+
+**Duplicate business event**
+
+```sql
+SELECT event_id, COUNT(*) AS versions
+FROM network_events
+GROUP BY event_id
+HAVING COUNT(*) > 1;
+```
+
+**Reconciliation**
+
+Aggregate theo dimension rồi so tổng với base metric.
 
 ---
 
-## 4. Worked example – Từ transaction grain sang customer grain
+## 5. Worked example – Transaction grain → customer grain
 
-### Business question
+### Requirement
 
-> Tổng doanh thu thành công của mỗi customer từ 01/08/2026 đến hết 05/08/2026 là bao nhiêu?
+> Tổng successful revenue/customer từ 01/08 đến hết 05/08/2026.
 
-### Bước 1 – Input grain
+### Reasoning
 
-`billing_transactions`: 1 row / transaction.
-
-### Bước 2 – Filter semantics
-
-Chỉ transaction `success`.
-
-Dùng half-open interval để tránh lỗi timestamp boundary:
-
-```sql
-transaction_ts >= TIMESTAMP '2026-08-01'
-AND transaction_ts < TIMESTAMP '2026-08-06'
+```text
+Input grain:  1 row / billing transaction
+Filter:       status = success; time [Aug-01, Aug-06)
+Output grain: 1 row / customer
+Business key: customer_id
 ```
-
-### Bước 3 – Output grain
-
-1 row / customer.
-
-### Query
 
 ```sql
 SELECT
-    customer_id,
-    COUNT(*) AS successful_txn_count,
-    SUM(amount) AS revenue
+  customer_id,
+  COUNT(*) AS successful_txn_count,
+  SUM(amount) AS revenue
 FROM billing_transactions
 WHERE status = 'success'
-  AND transaction_ts >= TIMESTAMP '2026-08-01'
-  AND transaction_ts <  TIMESTAMP '2026-08-06'
+  AND transaction_ts >= TIMESTAMP '2026-08-01 00:00:00'
+  AND transaction_ts <  TIMESTAMP '2026-08-06 00:00:00'
 GROUP BY customer_id
 ORDER BY revenue DESC;
 ```
 
-### Validation
-
-Reconcile tổng:
+### Validation 1 – output uniqueness
 
 ```sql
-SELECT SUM(amount)
-FROM billing_transactions
-WHERE status = 'success'
-  AND transaction_ts >= TIMESTAMP '2026-08-01'
-  AND transaction_ts <  TIMESTAMP '2026-08-06';
+WITH result AS (
+  SELECT customer_id, SUM(amount) AS revenue
+  FROM billing_transactions
+  WHERE status = 'success'
+    AND transaction_ts >= TIMESTAMP '2026-08-01 00:00:00'
+    AND transaction_ts <  TIMESTAMP '2026-08-06 00:00:00'
+  GROUP BY customer_id
+)
+SELECT customer_id, COUNT(*)
+FROM result
+GROUP BY customer_id
+HAVING COUNT(*) > 1;
 ```
 
-Tổng này phải bằng tổng `revenue` của result customer-level.
+Expected: 0 rows.
 
-Đây là mindset quan trọng: **aggregate query + reconciliation query**.
+### Validation 2 – reconciliation
+
+Tổng `revenue` của customer-level output phải bằng base successful amount với cùng filter.
 
 ---
 
-## 5. Hands-on lab
+## 6. Hands-on lab
 
-Chạy `labs/module-02-sql/schema.sql` và `seed.sql`.
-
-Tạo `lesson-01.sql` và hoàn thành:
-
-1. Viết comment mô tả grain của cả 7 bảng.
-2. Kiểm tra key nào unique thực sự bằng `GROUP BY ... HAVING COUNT(*) > 1`.
-3. Chứng minh `event_id` trong `network_events` có duplicate.
-4. Tính số billing transaction/customer.
-5. Tính tổng successful revenue/customer.
-6. So sánh row count trước và sau khi join `customers` với `billing_transactions`.
-7. Giải thích tại sao join đó không còn customer grain.
-8. Viết một validation query đảm bảo output customer-level chỉ có tối đa 1 row/customer.
-
-### Challenge
-
-Tạo query trả:
+Primary setup:
 
 ```text
-province | customer_count | successful_revenue
+labs/module-02-sql/databricks-setup.sql
 ```
 
-Trước khi code, ghi:
+Tạo `lesson-01.sql` hoặc notebook tương đương.
 
-```text
-Input grain:
-Join relationship:
-Output grain:
-Potential double-count risk:
+### Core
+
+1. Ghi grain của 7 tables.
+2. Xác định business key và technical key nếu có.
+3. Check uniqueness cho `customers.customer_id`, `plans.plan_id`.
+4. Chứng minh `network_events.event_id` có nhiều versions.
+5. Tính transaction count/customer.
+6. Tính successful revenue/customer.
+7. Join `customers` → `billing_transactions`; so row count trước/sau và giải thích grain output.
+8. Tạo revenue by province và reconcile với base successful revenue.
+
+### Databricks-specific
+
+9. Chạy:
+
+```sql
+SELECT * EXCEPT (email)
+FROM customers;
 ```
+
+Giải thích vì sao syntax này tiện cho exploration nhưng không tự thay thế explicit serving contract.
+
+10. Với một query aggregate, chạy `EXPLAIN` và chỉ quan sát rằng physical plan khác logical SQL structure. Chưa cần phân tích sâu.
 
 ### Deliverables
 
-- `lesson-01.sql`;
-- `notes.md` có 5–10 dòng mô tả grain/cardinality;
-- screenshot hoặc copy output của query phát hiện duplicate `event_id`.
+```text
+lesson-01.sql / notebook
+notes.md
+```
+
+Mỗi query quan trọng phải có header:
+
+```text
+Input grain:
+Output grain:
+Key:
+Cardinality assumption:
+Validation:
+```
 
 ---
 
-## 6. Knowledge check – MCQ
+## 7. Knowledge check – MCQ
 
-**Q1.** Grain tốt nhất mô tả điều gì?  
-A. Số column; B. Ý nghĩa của một row; C. Kích thước file; D. Index type.
+**Q1.** Grain mô tả:  
+A. số columns; B. ý nghĩa của một row; C. compute size; D. Delta version.
 
-**Q2.** `customers` 1:N `billing_transactions`. Join trực tiếp hai bảng thường tạo output gần grain nào?  
-A. 1 row/customer; B. 1 row/transaction có customer attributes; C. 1 row/province; D. luôn N:M.
+**Q2.** `GROUP BY customer_id` trên transaction relation thường tạo grain:  
+A. transaction; B. customer; C. partition; D. file.
 
-**Q3.** Một column tên `event_id` có đảm bảo unique không?  
-A. Có; B. Chỉ khi được constraint hoặc kiểm chứng; C. Chỉ với TEXT; D. Chỉ trong warehouse.
+**Q3.** Business key và technical key:  
+A. luôn giống nhau; B. có thể khác nhau; C. không dùng trong DE; D. chỉ cho OLTP.
 
-**Q4.** `WHERE` logic xảy ra trước hay sau `GROUP BY`?  
-A. Trước; B. Sau; C. Đồng thời; D. Không liên quan.
+**Q4.** Logical query reasoning có phải physical execution order của Databricks không?  
+A. luôn đúng; B. không, optimizer chọn physical plan; C. chỉ với Delta; D. chỉ với SQL Warehouse.
 
-**Q5.** Validation nào kiểm tra output 1 row/customer?  
-A. `ORDER BY`; B. `GROUP BY customer_id HAVING COUNT(*) > 1`; C. `LIMIT 10`; D. `SELECT *`.
+**Q5.** Validation phù hợp cho “1 row/customer”:  
+A. `LIMIT 10`; B. `GROUP BY customer_id HAVING COUNT(*) > 1`; C. `ORDER BY`; D. `SELECT *`.
 
-**Q6.** Surrogate key khác business key ở điểm quan trọng nào?  
-A. Surrogate key thường do hệ thống kỹ thuật sinh; B. luôn là string; C. không unique; D. không join được.
-
----
-
-## 7. Knowledge check – Tự luận / Interview
-
-1. “Grain” là gì? Giải thích bằng `billing_transactions` và `customers`.
-2. Tại sao một query có kết quả nhìn hợp lý nhưng vẫn có thể sai vì join fan-out?
-3. Primary key và business key có thể khác nhau như thế nào trong event ingestion?
-4. Giải thích logical query processing mà không đọc cú pháp SQL.
-5. Vì sao `LIMIT 10` không phải cách kiểm tra correctness?
-6. Bạn sẽ chứng minh bảng dimension phải unique theo key bằng SQL nào?
-7. Khi nào `SELECT *` chấp nhận được, khi nào nguy hiểm trong pipeline?
+**Q6.** `SELECT * EXCEPT (email)` trong Databricks chủ yếu:  
+A. loại column khỏi star projection; B. anti join; C. delete column khỏi table; D. dedup.
 
 ---
 
-## 8. Exit criteria
+## 8. Tự luận / Interview
 
-- [ ] Mô tả đúng grain của 7 bảng lab.
-- [ ] Phát hiện được duplicate `event_id` bằng SQL.
-- [ ] Dự đoán cardinality trước khi join.
-- [ ] Giải thích logical query order không nhìn tài liệu.
-- [ ] Có ít nhất 2 validation query cho bài aggregate.
-- [ ] Đạt ít nhất 5/6 MCQ.
+1. Grain là gì và vì sao nó quan trọng hơn việc query “chạy được”? 
+2. Vì sao `event_id` duplicate không đồng nghĩa exact duplicate?
+3. Logical relation pipeline khác physical query plan thế nào?
+4. Khi nào `SELECT *` chấp nhận được? Khi nào nguy hiểm?
+5. Cách chứng minh join N:1 thực sự không fan-out?
+6. Nếu Gold table có grain `date/province`, key logic là gì?
+
+---
+
+## 9. Exit criteria
+
+- [ ] Mô tả đúng grain của 7 tables.
+- [ ] Phân biệt business/technical/composite key.
+- [ ] Có >=2 validation query cho aggregate/join.
+- [ ] Giải thích logical vs physical execution.
+- [ ] Dùng được Databricks star `EXCEPT` và hiểu scope.
+- [ ] Đạt >=5/6 MCQ.

@@ -1,120 +1,135 @@
-# Module 02 – Lesson Answer Key
+# Module 02 – Lesson Answer Key (Databricks-first)
 
-> File này dùng để self-check sau khi đã hoàn thành lesson. Không thay thế việc chạy query và validation trên lab database.
+> Self-check sau khi đã làm lab. Answer key không thay thế việc chạy query, validation và đọc official Databricks docs.
 
-## Lesson 01 – Relational Thinking
+## Lesson 01 – Relational Thinking & Query Semantics
 
-**MCQ:** 1B, 2B, 3B, 4A, 5B, 6A.
-
-Điểm phải có trong tự luận:
-
-- Grain = ý nghĩa của một row; mọi join/aggregate đều có thể đổi hoặc preserve grain.
-- `customers → billing_transactions` là 1:N; join từ customer sang transaction tạo nhiều rows/customer.
-- Primary key kỹ thuật có thể khác business key; `network_events.ingest_row_id` vs `event_id` là ví dụ.
-- Correctness phải kiểm chứng bằng uniqueness/reconciliation/row-count checks, không phải `LIMIT 10`.
-- Logical reasoning: FROM/JOIN → WHERE → GROUP/HAVING → SELECT/window-related output → DISTINCT/ORDER/LIMIT ở mức mental model.
-
-## Lesson 02 – Filtering, NULL, CASE & Types
-
-**MCQ:** 1C, 2B, 3A, 4B, 5B, 6B.
+**MCQ:** `1B, 2B, 3B, 4B, 5B, 6A`
 
 Điểm phải có:
 
-- `NULL` tạo UNKNOWN trong comparison; `WHERE` chỉ giữ TRUE.
-- `IS NULL`, không `= NULL`.
-- Half-open interval `[start, end)` tránh lỗi cuối ngày và ghép batch boundaries tốt.
-- Right-table predicate trong `WHERE` sau LEFT JOIN có thể loại unmatched rows.
-- `NOT EXISTS` thường dễ reasoning hơn `NOT IN` khi NULL có thể xuất hiện.
-- `COALESCE` không phải data-quality repair; nó thay output semantics.
+- Grain = ý nghĩa một row.
+- Business key có thể khác technical key.
+- Logical SQL reasoning không phải physical execution order; optimizer quyết định physical plan.
+- Join/aggregate phải được kiểm tra bằng cardinality/uniqueness/reconciliation.
+- `SELECT * EXCEPT (...)` là projection convenience, không thay explicit serving contract.
+
+## Lesson 02 – NULL, Types & try_cast
+
+**MCQ:** `1A, 2B, 3B, 4B, 5B, 6B, 7A`
+
+Điểm phải có:
+
+- `WHERE` giữ TRUE; comparison với NULL có UNKNOWN semantics.
+- Dùng `IS NULL`, không `= NULL`.
+- `try_cast` biến malformed supported casts thành NULL để pipeline có thể classify/quarantine; nó không tự sửa quality.
+- Strict `CAST` phù hợp khi invalid input phải fail.
+- Half-open interval `[start,end)` phù hợp batch boundaries.
+- Right-side predicate trong `WHERE` có thể phá LEFT JOIN row preservation.
+- Null-safe comparison khác ordinary `=` khi NULL tham gia.
 
 ## Lesson 03 – Aggregation
 
-**MCQ:** 1B, 2A, 3B, 4B, 5A, 6B.
+**MCQ:** `1B, 2A, 3A, 4A, 5A, 6B, 7A`
 
 Điểm phải có:
 
-- `COUNT(*)` đếm rows; `COUNT(column)` bỏ NULL; `COUNT(DISTINCT ...)` đếm distinct non-null values theo expression semantics.
-- WHERE filter base rows; HAVING filter grouped result.
-- Fact join history có thể multiply rows trước aggregate.
-- Average-of-averages sai nếu group sizes khác nhau mà không weight.
-- Reconciliation: sum grouped metric = global metric theo cùng population/filter.
+- `GROUP BY` thay đổi grain.
+- `WHERE` filter base rows; `HAVING` filter groups.
+- `count_if` đếm true conditions.
+- Aggregate `FILTER` giới hạn rows đi vào aggregate expression.
+- Join fan-out trước SUM gây double-count.
+- `DISTINCT` không phải generic join repair.
+- Average-of-averages cần weighting nếu group sizes khác.
+- `ROLLUP/CUBE/GROUPING SETS` tạo multi-grain result nên phải interpret subtotal rows rõ.
 
-## Lesson 04 – JOINs & Cardinality
+## Lesson 04 – JOINs & Set Operations
 
-**MCQ:** 1A, 2A, 3B, 4B, 5B, 6B.
-
-Điểm phải có:
-
-- Dự đoán matches per left row trước join.
-- `LEFT JOIN` preserve left population.
-- Fan-out cần sửa grain/relation hoặc temporal join condition; `DISTINCT` không phải fix mặc định.
-- `EXISTS` = semi-join semantics; `NOT EXISTS` = anti-join semantics.
-- `UNION ALL` giữ rows; `UNION` deduplicate set result.
-- History/SCD join thường cần entity key + validity interval.
-
-## Lesson 05 – Subqueries, CTEs & EXISTS
-
-**MCQ:** 1A, 2A, 3A, 4B, 5B, 6A.
+**MCQ:** `1A, 2B, 3B, 4A, 5B, 6B, 7B`
 
 Điểm phải có:
 
-- CTE nên có purpose/grain/key rõ.
-- CTE không enforce uniqueness/correctness.
-- `EXISTS` rõ khi business question là existence.
-- Correlated subquery tham chiếu outer row.
-- Không học thuộc assumption performance “CTE luôn chậm/nhanh”; kiểm chứng bằng plan của engine.
+- Fact N:1 unique dimension thường preserve fact grain.
+- `LEFT SEMI JOIN` = left rows có match.
+- `LEFT ANTI JOIN` = left rows không match.
+- History equality join có thể fan-out.
+- `UNION ALL` giữ duplicates; `UNION` default duplicate removal.
+- Exploding join trước hết là cardinality/correctness investigation, sau đó mới performance.
+- Temporal join cần business key + validity interval.
 
-## Lesson 06 – Window Functions
+## Lesson 05 – Subqueries & CTEs
 
-**MCQ:** 1B, 2B, 3C, 4A, 5A, 6B.
-
-Điểm phải có:
-
-- Window giữ row identity; GROUP BY thay đổi grain.
-- `ROW_NUMBER` chọn đúng một winner nếu ordering deterministic.
-- `RANK`: ties có gap; `DENSE_RANK`: ties không gap.
-- `LAG`/`LEAD` dùng cho previous/next state/value.
-- Explicit frame giúp phân biệt running aggregate và whole-partition aggregate.
-- Latest-row cần business ordering + tie-breaker, không chỉ “DESC timestamp” theo thói quen.
-
-## Lesson 07 – Data Engineering SQL Patterns
-
-**MCQ:** 1B, 2A, 3A, 4A, 5A, 6A.
+**MCQ:** `1A, 2B, 3A, 4B, 5A, 6A`
 
 Điểm phải có:
 
-- Dedup bắt đầu bằng business key + winner rule.
-- Event time/effective time/ingestion time có semantics khác nhau.
-- Incremental = state management; cần boundaries, checkpoint/watermark, retry strategy.
-- Idempotency là property của repeated execution; dedup là một kỹ thuật xử lý repeated/business duplicate records.
-- Watermark có thể miss hard delete hoặc backdated change nếu source không expose signal phù hợp.
-- SCD2 giữ historical versions và point-in-time join bằng validity interval.
+- CTE là named relation, không tự enforce uniqueness.
+- Mỗi CTE cần purpose/grain/key.
+- `EXISTS`/SEMI JOIN express presence; `NOT EXISTS`/ANTI JOIN express absence.
+- Không kết luận CTE/subquery performance từ syntax alone.
+- Recursive CTE có base step + recursive step + termination reasoning; feature/runtime applicability phải được kiểm tra.
 
-## Lesson 08 – Indexes & EXPLAIN
+## Lesson 06 – Window Functions & QUALIFY
 
-**MCQ:** 1B, 2B, 3A, 4A, 5A, 6A, 7A.
+**MCQ:** `1B, 2A, 3B, 4B, 5B, 6A, 7A`
 
 Điểm phải có:
 
-- Index giảm search work cho một số patterns nhưng tăng storage/write maintenance.
-- Planner có thể chọn Seq Scan nếu estimated cheaper.
-- Selectivity ảnh hưởng usefulness của access path.
-- Composite index order phải dựa trên workload; không học thuộc luật tuyệt đối thiếu context.
-- `EXPLAIN ANALYZE` chạy query và cho actual metrics.
-- Estimated vs actual rows lệch lớn là cardinality-estimation signal.
-- Nested Loop/Hash/Merge là physical join strategies; optimizer chọn dựa trên plan/cost/data.
+- Window giữ row identity; GROUP BY collapse grain.
+- `QUALIFY` filter window-function results.
+- `HAVING` filter grouped aggregate result.
+- `ROW_NUMBER` tạo unique ordinal; `RANK` ties + gaps; `DENSE_RANK` ties no gaps.
+- Deterministic latest-row/dedup cần complete ordering/tie-breaker.
+- Window frame quyết định population của running/moving aggregate.
+- `LEAD` hữu ích để derive next effective boundary.
 
-## Self-check chuẩn trước khi qua Module 03
+## Lesson 07 – Data Engineering SQL on Delta
 
-Bạn nên tự trả lời được, không nhìn notes:
+**MCQ:** `1B, 2A, 3B, 4A, 5A, 6A, 7A, 8A`
 
-1. Grain của một table/query result là gì?
-2. Vì sao NULL làm `NOT IN` khó reasoning?
-3. Làm sao chứng minh join không fan-out?
-4. Latest-row/customer viết và validate thế nào?
-5. Dedup event stream khác `SELECT DISTINCT` thế nào?
-6. Watermark retry có thể tạo duplicate ra sao?
-7. `ROW_NUMBER` vs `RANK`.
-8. Tại sao index tồn tại nhưng planner không dùng?
-9. `EXPLAIN ANALYZE` cung cấp bằng chứng gì?
-10. Một query revenue sai, bạn debug theo thứ tự nào?
+Điểm phải có:
+
+- Dedup bắt đầu bằng business key + winner/tie-breaker.
+- `QUALIFY ROW_NUMBER()` chọn canonical row nhưng không xóa duplicate raw data.
+- MERGE source phải có unambiguous match semantics; pre-dedup source khi nhiều source rows có thể match cùng target.
+- Watermark = state management; checkpoint/retry/late/delete semantics là một phần design.
+- Plain append retry có thể duplicate; MERGE/upsert chỉ idempotent nếu key/logic/input semantics đúng.
+- SCD2 giữ history versions + validity intervals.
+- AUTO CDC là Lakeflow primitive cho sequencing/SCD application; vẫn cần keys/sequence contract.
+- Watermark không tự capture hard delete nếu không có delete signal.
+
+## Lesson 08 – EXPLAIN, Query Profile & Performance
+
+**MCQ:** `1A, 2A, 3B, 4A, 5A, 6A, 7A, 8A`
+
+Điểm phải có:
+
+- `EXPLAIN` = planned logical/physical execution information; Query Profile = runtime execution evidence/metrics.
+- Exploding join phải kiểm tra cardinality/business semantics trước khi scale compute.
+- Shuffle = redistribution of data across workers/partitions.
+- AQE có thể adapt parts of physical execution from runtime statistics; không sửa wrong business logic.
+- Photon là native vectorized execution engine for supported workloads; không thay correctness/query design.
+- Statistics ảnh hưởng estimates/cost/join decisions.
+- Full scan không luôn là bug; context/table size/filter intent quan trọng.
+- Optimization loop: correctness → measure → evidence → hypothesis/change → remeasure.
+
+---
+
+# Self-check trước khi rời Module 02
+
+Không nhìn notes, hãy trả lời:
+
+1. Grain là gì? Business key khác technical key?
+2. `CAST` vs `try_cast`.
+3. `WHERE` vs `HAVING` vs `QUALIFY`.
+4. INNER/LEFT/SEMI/ANTI JOIN.
+5. Làm sao prove join không fan-out?
+6. `ROW_NUMBER` vs `RANK`.
+7. Dedup event bằng `QUALIFY` cần contract gì?
+8. Vì sao MERGE source duplicate nguy hiểm?
+9. Watermark miss hard delete thế nào?
+10. Manual MERGE vs AUTO CDC.
+11. EXPLAIN vs Query Profile.
+12. AQE/Photon giúp gì và không giúp gì?
+
+Nếu chưa trả lời được bằng ví dụ telecom mà không đọc notes, chưa nên coi Module 02 hoàn thành.

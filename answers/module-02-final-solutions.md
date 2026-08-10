@@ -1,6 +1,6 @@
-# Module 02 Final Assessment – Suggested Solutions
+# Module 02 Final Assessment – Suggested Solutions (Databricks-first)
 
-> Đây là **suggested solutions**, không phải cách viết duy nhất. Một query khác vẫn đúng nếu grain, semantics và validation đúng.
+> Đây là reference solution, không phải cách viết duy nhất. Alternative solution vẫn đúng nếu grain, semantics, Delta behavior và validation đúng.
 
 ---
 
@@ -8,9 +8,9 @@
 
 ```text
 1B  2A  3B  4B  5B
-6A  7A  8A  9B  10A
-11A 12B 13A 14B 15A
-16A 17B 18A 19A 20B
+6A  7B  8A  9B 10A
+11B 12B 13A 14A 15A
+16A 17A 18B 19A 20A
 ```
 
 ---
@@ -23,42 +23,42 @@
 
 ```sql
 SELECT
-    b.transaction_ts::date AS revenue_date,
-    c.province,
-    COUNT(*) AS successful_txn_count,
-    COUNT(DISTINCT b.customer_id) AS unique_paying_customers,
-    SUM(b.amount) AS successful_revenue
+  CAST(b.transaction_ts AS DATE) AS revenue_date,
+  c.province,
+  COUNT(*) AS successful_txn_count,
+  COUNT(DISTINCT b.customer_id) AS unique_paying_customers,
+  SUM(b.amount) AS successful_revenue
 FROM billing_transactions b
 JOIN customers c
   ON c.customer_id = b.customer_id
 WHERE b.status = 'success'
-GROUP BY
-    b.transaction_ts::date,
-    c.province
+GROUP BY CAST(b.transaction_ts AS DATE), c.province
 ORDER BY revenue_date, province;
 ```
 
 Reconciliation:
 
 ```sql
-WITH x AS (
-    SELECT
-        b.transaction_ts::date AS revenue_date,
-        c.province,
-        SUM(b.amount) AS revenue
-    FROM billing_transactions b
-    JOIN customers c ON c.customer_id = b.customer_id
-    WHERE b.status = 'success'
-    GROUP BY b.transaction_ts::date, c.province
+WITH by_province AS (
+  SELECT
+    CAST(b.transaction_ts AS DATE) AS revenue_date,
+    c.province,
+    SUM(b.amount) AS revenue
+  FROM billing_transactions b
+  JOIN customers c
+    ON c.customer_id = b.customer_id
+  WHERE b.status = 'success'
+  GROUP BY CAST(b.transaction_ts AS DATE), c.province
 )
-SELECT SUM(revenue) FROM x;
+SELECT SUM(revenue) AS grouped_total
+FROM by_province;
 
-SELECT SUM(amount)
+SELECT SUM(amount) AS base_total
 FROM billing_transactions
 WHERE status = 'success';
 ```
 
-Hai totals phải bằng nhau nếu mọi billing customer đều match dimension đúng 1 row.
+Nếu totals khác: kiểm tra customer uniqueness/orphan/filter mismatch.
 
 ## B2 – Customers without successful payment
 
@@ -66,147 +66,153 @@ Hai totals phải bằng nhau nếu mọi billing customer đều match dimensio
 
 ```sql
 SELECT
-    c.customer_id,
-    c.full_name,
-    c.province
+  c.customer_id,
+  c.full_name,
+  c.province
+FROM customers c
+LEFT ANTI JOIN billing_transactions b
+  ON b.customer_id = c.customer_id
+ AND b.status = 'success';
+```
+
+Equivalent intent:
+
+```sql
+SELECT c.customer_id, c.full_name, c.province
 FROM customers c
 WHERE NOT EXISTS (
-    SELECT 1
-    FROM billing_transactions b
-    WHERE b.customer_id = c.customer_id
-      AND b.status = 'success'
+  SELECT 1
+  FROM billing_transactions b
+  WHERE b.customer_id = c.customer_id
+    AND b.status = 'success'
 );
 ```
 
-Không cần join + DISTINCT vì output chỉ cần relation `customers` và một existence predicate.
+Cả hai nói “không có matching successful transaction”.
 
 ## B3 – Latest customer status
 
 **Grain:** 1 row/customer.
 
 ```sql
-WITH ranked AS (
-    SELECT
-        h.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY customer_id
-            ORDER BY
-                effective_from DESC,
-                recorded_at DESC,
-                status_history_id DESC
-        ) AS rn
-    FROM customer_status_history h
-)
 SELECT
-    customer_id,
-    status,
-    effective_from,
-    recorded_at
-FROM ranked
-WHERE rn = 1;
+  customer_id,
+  status,
+  effective_from,
+  recorded_at
+FROM customer_status_history
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY customer_id
+  ORDER BY
+    effective_from DESC,
+    recorded_at DESC,
+    status_history_id DESC
+) = 1;
 ```
 
 Validation:
 
 ```sql
 WITH latest AS (
-    -- query above
+  SELECT
+    customer_id,
+    status,
+    effective_from,
+    recorded_at
+  FROM customer_status_history
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY customer_id
+    ORDER BY effective_from DESC, recorded_at DESC, status_history_id DESC
+  ) = 1
 )
-SELECT customer_id, COUNT(*)
+SELECT customer_id, COUNT(*) AS n
 FROM latest
 GROUP BY customer_id
 HAVING COUNT(*) > 1;
 ```
 
-Expected 0 rows.
+Expected: 0 rows.
 
 ## B4 – Top 2 successful transactions/customer
 
-Output grain: transaction rows selected by rank rule.
-
 ```sql
-WITH ranked AS (
-    SELECT
-        b.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY customer_id
-            ORDER BY
-                amount DESC,
-                transaction_ts DESC,
-                transaction_id DESC
-        ) AS rn
-    FROM billing_transactions b
-    WHERE status = 'success'
-)
-SELECT *
-FROM ranked
-WHERE rn <= 2
-ORDER BY customer_id, rn;
+SELECT
+  transaction_id,
+  customer_id,
+  transaction_ts,
+  amount,
+  status
+FROM billing_transactions
+WHERE status = 'success'
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY customer_id
+  ORDER BY amount DESC, transaction_ts DESC, transaction_id DESC
+) <= 2
+ORDER BY customer_id, amount DESC, transaction_ts DESC;
 ```
 
-`ROW_NUMBER` phù hợp vì requirement muốn tối đa 2 rows/customer, kể cả khi amount tie.
+`ROW_NUMBER` đảm bảo tối đa 2 rows/customer theo deterministic ordering.
 
 ## B5 – Day-over-day revenue
 
-**Grain:** 1 row/day.
-
 ```sql
 WITH daily AS (
-    SELECT
-        transaction_ts::date AS revenue_date,
-        SUM(amount) AS revenue
-    FROM billing_transactions
-    WHERE status = 'success'
-    GROUP BY transaction_ts::date
+  SELECT
+    CAST(transaction_ts AS DATE) AS revenue_date,
+    SUM(amount) AS revenue
+  FROM billing_transactions
+  WHERE status = 'success'
+  GROUP BY CAST(transaction_ts AS DATE)
 ),
 with_prev AS (
-    SELECT
-        revenue_date,
-        revenue,
-        LAG(revenue) OVER (ORDER BY revenue_date) AS previous_day_revenue
-    FROM daily
-)
-SELECT
+  SELECT
     revenue_date,
     revenue,
-    previous_day_revenue,
-    revenue - previous_day_revenue AS absolute_change,
-    (revenue - previous_day_revenue)
-        / NULLIF(previous_day_revenue, 0) AS pct_change
+    LAG(revenue) OVER (ORDER BY revenue_date) AS previous_day_revenue
+  FROM daily
+)
+SELECT
+  revenue_date,
+  revenue,
+  previous_day_revenue,
+  revenue - previous_day_revenue AS absolute_change,
+  CAST(revenue - previous_day_revenue AS DOUBLE)
+    / NULLIF(CAST(previous_day_revenue AS DOUBLE), 0.0) AS pct_change
 FROM with_prev
 ORDER BY revenue_date;
 ```
 
-Lưu ý: nếu calendar day không có transaction thì relation `daily` không sinh row ngày đó. Nếu business cần continuous calendar, phải join với calendar dimension/date series.
+Nếu business cần calendar liên tục kể cả ngày không transaction, phải join date/calendar relation.
 
 ## B6 – Deduplicated network drop rate
 
 ```sql
-WITH ranked AS (
-    SELECT
-        n.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY event_id
-            ORDER BY
-                payload_version DESC,
-                ingested_at DESC,
-                ingest_row_id DESC
-        ) AS rn
-    FROM network_events n
-),
-dedup AS (
-    SELECT *
-    FROM ranked
-    WHERE rn = 1
+WITH clean AS (
+  SELECT
+    ingest_row_id,
+    event_id,
+    tower_id,
+    customer_id,
+    event_type,
+    event_ts,
+    ingested_at,
+    signal_dbm,
+    duration_seconds,
+    payload_version
+  FROM network_events
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY event_id
+    ORDER BY payload_version DESC, ingested_at DESC, ingest_row_id DESC
+  ) = 1
 )
 SELECT
-    tower_id,
-    SUM(CASE WHEN event_type = 'call_drop' THEN 1 ELSE 0 END)::numeric
-      / NULLIF(
-          SUM(CASE WHEN event_type IN ('call_drop','call_end') THEN 1 ELSE 0 END),
-          0
-        ) AS call_drop_rate
-FROM dedup
+  tower_id,
+  count_if(event_type = 'call_drop') AS drops,
+  count_if(event_type IN ('call_drop','call_end')) AS total_calls,
+  CAST(count_if(event_type = 'call_drop') AS DOUBLE)
+    / NULLIF(CAST(count_if(event_type IN ('call_drop','call_end')) AS DOUBLE), 0.0)
+    AS drop_rate
+FROM clean
 GROUP BY tower_id
 ORDER BY tower_id;
 ```
@@ -214,59 +220,221 @@ ORDER BY tower_id;
 Uniqueness validation:
 
 ```sql
-WITH dedup AS (...)
+WITH clean AS (
+  SELECT *
+  FROM network_events
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY event_id
+    ORDER BY payload_version DESC, ingested_at DESC, ingest_row_id DESC
+  ) = 1
+)
 SELECT event_id, COUNT(*)
-FROM dedup
+FROM clean
 GROUP BY event_id
 HAVING COUNT(*) > 1;
 ```
 
-Expected 0 rows.
+## B7 – Conditional metric styles
 
-## B7 – Active-plan revenue
+Example:
 
-Check assumption trước:
+```sql
+SELECT
+  CAST(transaction_ts AS DATE) AS revenue_date,
+  count_if(status = 'success') AS successful_count,
+  COUNT(*) FILTER (WHERE status = 'failed') AS failed_count,
+  SUM(CASE WHEN status = 'success' THEN amount ELSE 0 END) AS successful_revenue
+FROM billing_transactions
+GROUP BY CAST(transaction_ts AS DATE)
+ORDER BY revenue_date;
+```
+
+Reasoning:
+
+- `count_if` rõ nhất cho boolean count.
+- `FILTER` đặt population cạnh aggregate.
+- `CASE` portable và linh hoạt khi transformation phức tạp hơn.
+
+## B8 – Safe type parsing
+
+```sql
+WITH raw AS (
+  SELECT *
+  FROM VALUES
+    ('100'),
+    ('25.5'),
+    ('bad'),
+    (CAST(NULL AS STRING))
+  AS t(raw_value)
+),
+parsed AS (
+  SELECT
+    raw_value,
+    try_cast(raw_value AS DECIMAL(14,2)) AS parsed_decimal
+  FROM raw
+)
+SELECT
+  raw_value,
+  parsed_decimal,
+  CASE
+    WHEN raw_value IS NULL THEN 'missing'
+    WHEN parsed_decimal IS NULL THEN 'malformed'
+    ELSE 'valid'
+  END AS parse_status
+FROM parsed;
+```
+
+`try_cast` chỉ tạo safe parse result; classification mới làm parse failure observable.
+
+---
+
+# Phần C – Delta / Incremental / Debugging
+
+## C1 – Delta MERGE current-state table
+
+Example target:
+
+```sql
+CREATE OR REPLACE TABLE customer_current
+USING DELTA
+AS
+SELECT
+  customer_id,
+  full_name,
+  province,
+  email,
+  segment,
+  updated_at
+FROM customers;
+```
+
+Example updates:
+
+```sql
+CREATE OR REPLACE TEMP VIEW customer_updates AS
+SELECT * FROM VALUES
+  (1001,'Nguyen An','Ha Noi','an@example.com','premium',TIMESTAMP '2026-08-10 10:00:00'),
+  (1009,'New Customer','Hue','new@example.com','mass',TIMESTAMP '2026-08-10 11:00:00')
+AS t(customer_id,full_name,province,email,segment,updated_at);
+```
+
+MERGE:
+
+```sql
+MERGE INTO customer_current AS t
+USING customer_updates AS s
+ON t.customer_id = s.customer_id
+WHEN MATCHED THEN UPDATE SET
+  t.full_name = s.full_name,
+  t.province = s.province,
+  t.email = s.email,
+  t.segment = s.segment,
+  t.updated_at = s.updated_at
+WHEN NOT MATCHED THEN INSERT (
+  customer_id, full_name, province, email, segment, updated_at
+) VALUES (
+  s.customer_id, s.full_name, s.province, s.email, s.segment, s.updated_at
+);
+```
+
+Key:
+
+```text
+Target grain: 1 row/customer
+Merge key: customer_id
+```
+
+Rerun same deterministic source: matched row updates again, new customer is now matched; no additional key should appear.
+
+Validation:
 
 ```sql
 SELECT customer_id, COUNT(*)
-FROM subscriptions
-WHERE status = 'active'
-  AND ended_at IS NULL
+FROM customer_current
 GROUP BY customer_id
 HAVING COUNT(*) > 1;
 ```
 
-Nếu 0 rows:
+## C2 – Duplicate MERGE source
 
-```sql
-WITH active_subscriptions AS (
-    SELECT customer_id, plan_id
-    FROM subscriptions
-    WHERE status = 'active'
-      AND ended_at IS NULL
-)
-SELECT
-    p.plan_name,
-    SUM(b.amount) AS successful_revenue
-FROM billing_transactions b
-JOIN active_subscriptions s
-  ON s.customer_id = b.customer_id
-JOIN plans p
-  ON p.plan_id = s.plan_id
-WHERE b.status = 'success'
-GROUP BY p.plan_name
-ORDER BY successful_revenue DESC;
-```
-
-Nếu assumption không đúng, business rule phải xác định subscription nào là current winner thay vì tiếp tục aggregate.
-
-## B8 – Incremental candidate set
-
-Một convention hợp lệ:
+Problem:
 
 ```text
-(last_watermark, upper_bound]
+source row A customer_id=1001
+source row B customer_id=1001
 ```
+
+Both can match one target row. Winner semantics are undefined unless source is canonicalized.
+
+Example fix:
+
+```sql
+WITH source_clean AS (
+  SELECT *
+  FROM customer_updates
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY customer_id
+    ORDER BY updated_at DESC
+  ) = 1
+)
+MERGE INTO customer_current t
+USING source_clean s
+ON t.customer_id = s.customer_id
+WHEN MATCHED THEN UPDATE SET
+  t.full_name = s.full_name,
+  t.province = s.province,
+  t.email = s.email,
+  t.segment = s.segment,
+  t.updated_at = s.updated_at
+WHEN NOT MATCHED THEN INSERT (
+  customer_id, full_name, province, email, segment, updated_at
+) VALUES (
+  s.customer_id, s.full_name, s.province, s.email, s.segment, s.updated_at
+);
+```
+
+Winner rule phải được business/source contract xác nhận; `updated_at DESC` ở đây chỉ là example.
+
+## C3 – Revenue triples after history join
+
+Root cause: history có nhiều rows/customer; each billing fact matches multiple history versions.
+
+Proof:
+
+```sql
+SELECT
+  b.transaction_id,
+  COUNT(*) AS copies_after_join
+FROM billing_transactions b
+JOIN customer_status_history h
+  ON h.customer_id = b.customer_id
+WHERE b.status = 'success'
+GROUP BY b.transaction_id
+HAVING COUNT(*) > 1;
+```
+
+Or:
+
+```sql
+SELECT
+  COUNT(*) AS joined_rows,
+  COUNT(DISTINCT b.transaction_id) AS distinct_transactions
+FROM billing_transactions b
+JOIN customer_status_history h
+  ON h.customer_id = b.customer_id
+WHERE b.status = 'success';
+```
+
+Correct relation depends on requirement:
+
+- current/latest status → 1 row/customer relation using `QUALIFY`;
+- status at transaction time → SCD/temporal validity join.
+
+`DISTINCT` không solve business relationship; differing history rows are genuinely distinct physical rows.
+
+## C4 – Watermark failure reasoning
+
+One valid convention `(last, upper]`:
 
 ```sql
 SELECT *
@@ -275,179 +443,139 @@ WHERE updated_at >  TIMESTAMP '2026-08-03 00:00:00'
   AND updated_at <= TIMESTAMP '2026-08-06 00:00:00';
 ```
 
-Một convention `[last, upper)` cũng hợp lệ nếu checkpoint semantics nhất quán và target idempotent.
-
-**Retry risk:** append lại cùng candidate rows tạo duplicate.
-
-**Target business/upsert key:** `transaction_id` cho dataset này.
-
-**Potential miss:** hard delete không tạo row/update timestamp, hoặc backdated update có `updated_at` không tăng theo contract.
-
----
-
-# Phần C – Debugging & Correctness
-
-## C1 – Revenue triples
-
-Root cause: `customer_status_history` nhiều row/customer. Billing fact join history chỉ bằng customer_id nên mỗi transaction match nhiều status rows.
-
-Fan-out proof:
-
-```sql
-SELECT
-    COUNT(*) AS joined_rows,
-    COUNT(DISTINCT b.transaction_id) AS distinct_transactions
-FROM billing_transactions b
-JOIN customer_status_history h
-  ON h.customer_id = b.customer_id
-WHERE b.status = 'success';
-```
-
-Hoặc per transaction:
-
-```sql
-SELECT
-    b.transaction_id,
-    COUNT(*) AS copies_after_join
-FROM billing_transactions b
-JOIN customer_status_history h
-  ON h.customer_id = b.customer_id
-GROUP BY b.transaction_id
-HAVING COUNT(*) > 1;
-```
-
-Fix: tạo relation history đúng grain theo business requirement, ví dụ latest-status 1 row/customer hoặc point-in-time status 1 version/fact timestamp.
-
-`DISTINCT` không phải fix vì rows khác status/history fields có thể không identical, và ngay cả khi distinct loại được rows, nó không chứng minh business relationship đúng.
-
-## C2 – LEFT JOIN loses customers
-
-`WHERE b.status='success'` loại unmatched rows vì `b.status` là NULL → predicate không TRUE.
-
-Nếu intent là attach successful transactions nhưng preserve mọi customer:
-
-```sql
-SELECT c.customer_id, b.transaction_id
-FROM customers c
-LEFT JOIN billing_transactions b
-  ON b.customer_id = c.customer_id
- AND b.status = 'success';
-```
-
-## C3 – End-date filter
-
-```sql
-WHERE transaction_ts >= TIMESTAMP '2026-08-01'
-  AND transaction_ts <  TIMESTAMP '2026-08-06'
-```
-
-Half-open interval bao toàn bộ ngày 01–05 và tránh phụ thuộc precision cuối ngày.
-
-## C4 – DISTINCT dedup
-
-`e005` versions khác `payload_version`, `signal_dbm`, `ingested_at`; `DISTINCT *` đúng khi rows giống toàn bộ selected columns, không phải khi business key trùng.
-
-Dedup contract phải nêu:
+Failure after target write but before checkpoint:
 
 ```text
-business key: event_id
-winner: max payload_version
-then max ingested_at
-then max ingest_row_id
+retry reads same logical batch
+plain append → duplicate risk
+idempotent MERGE/upsert → safer if key/logic correct
 ```
 
-sau đó dùng `ROW_NUMBER`.
+Late/backdated risk: source changes whose update/event semantics fall behind committed watermark can be skipped unless overlap/CDC signal exists.
+
+Hard delete: deleted row no longer exists to satisfy timestamp predicate; need delete/change signal, CDC/change feed, snapshot diff, or other source semantics.
+
+AUTO CDC becomes better production primitive when ordered change feed/SCD handling/out-of-order events make hand-written MERGE/state logic complex.
 
 ---
 
-# Phần D – EXPLAIN & Performance
+# Phần D – EXPLAIN & Query Profile
 
-## D1 – Candidate index
-
-```sql
-CREATE INDEX idx_billing_customer_ts
-ON billing_transactions(customer_id, transaction_ts);
-```
-
-Reasoning:
-
-- equality predicate trên customer;
-- range + ordering theo transaction time;
-- index key order phản ánh query pattern.
-
-Lab nhỏ có thể Seq Scan vì planner estimate scan vài pages rẻ hơn index traversal/random heap access.
-
-Kiểm chứng:
+## D1 – Plan reasoning
 
 ```sql
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT ...;
+EXPLAIN FORMATTED
+SELECT
+  c.province,
+  SUM(b.amount) AS revenue
+FROM billing_transactions b
+JOIN customers c
+  ON c.customer_id = b.customer_id
+WHERE b.status = 'success'
+GROUP BY c.province;
 ```
 
-So sánh plan trước/sau và scale-up table lớn.
+Likely conceptual operators to inspect:
 
-## D2 – Estimate mismatch
+```text
+scans
+filter
+join
+exchange/shuffle if distributed strategy requires
+aggregate
+```
 
-`100 estimated` vs `100000 actual` = severe cardinality-estimation error.
+Logical plan describes relational transformations. Physical plan chooses concrete execution operators/strategies.
 
-Hệ quả có thể:
+Statistics/cardinality estimates influence:
 
-- chọn nested loop khi input thực rất lớn;
-- memory allocation/aggregate strategy không phù hợp;
-- join order/cost decision kém.
+```text
+join order
+join strategy/build side
+cost estimates
+some partition/exchange decisions
+```
 
-Kiểm tra tiếp:
+## D2 – Runtime incident
 
-- statistics freshness;
-- data distribution/skew;
-- correlated predicates;
-- selectivity assumption;
-- expression/cast;
-- extended statistics nếu relevant;
-- plan nodes upstream tạo mismatch từ đâu.
+50× join output near slowest operator = **exploding join / row amplification signal**.
+
+Check first:
+
+```text
+left grain
+right grain
+join key
+expected matches per left row
+right-key uniqueness
+missing temporal condition
+```
+
+Query Profile evidence:
+
+```text
+input rows
+output rows
+operator time
+shuffle/exchange
+memory/I/O
+```
+
+AQE may adapt physical execution and Photon may execute supported operations efficiently, but neither changes a wrong business join relationship into the correct one.
+
+Fix correctness first, then re-run and compare profile.
 
 ---
 
 # Phần E – Oral Interview Rubric
 
-Mỗi câu 1 điểm nếu câu trả lời có **definition + example/trade-off** thay vì chỉ đọc keyword.
+Mỗi câu 1 điểm nếu có definition + example/failure mode.
 
 ### 1. Grain
 
-Một row đại diện điều gì. Grain quyết định key, aggregate và join cardinality.
+Meaning of one row. It determines key/cardinality/aggregation correctness.
 
-### 2. WHERE vs HAVING
+### 2. NULL / try_cast
 
-WHERE filter rows trước aggregation; HAVING filter groups sau aggregation.
+`NULL` = missing/unknown semantics. `try_cast` turns malformed supported conversion into NULL so quality logic can classify/quarantine instead of hard-failing.
 
-### 3. INNER vs LEFT
+### 3. WHERE / HAVING / QUALIFY
 
-INNER chỉ match; LEFT preserve population phía trái và attach matches nếu có.
+```text
+WHERE   → base rows
+HAVING  → grouped aggregate results
+QUALIFY → window-function results
+```
 
-### 4. ROW_NUMBER vs RANK
+### 4. INNER / LEFT / SEMI / ANTI
 
-ROW_NUMBER unique sequence; RANK giữ ties và tạo gap. Chọn theo tie semantics.
+```text
+INNER → matched pairs
+LEFT  → preserve left + attach matches
+SEMI  → left rows with match
+ANTI  → left rows without match
+```
 
-### 5. Dedup stream
+### 5. ROW_NUMBER vs RANK
 
-Business key + deterministic winner + validation; thường dùng ROW_NUMBER, không DISTINCT *.
+ROW_NUMBER unique sequence; RANK keeps ties + gap. Choose by tie semantics.
 
-### 6. Full vs incremental
+### 6. Dedup event
 
-Full đơn giản/state-light nhưng expensive scale; incremental ít data hơn nhưng cần state, retry, late/delete semantics.
+Business key + deterministic winner + `QUALIFY ROW_NUMBER` + uniqueness validation.
 
-### 7. SCD1 vs SCD2
+### 7. MERGE INTO
 
-Type1 overwrite current; Type2 giữ historical versions + validity intervals.
+Delta upsert/delete primitive; key risks include ambiguous multiple source matches, wrong merge key, non-idempotent source semantics.
 
-### 8. Index
+### 8. Watermark vs AUTO CDC
 
-Search structure giảm read work cho workloads phù hợp, đổi lại storage/write maintenance.
+Watermark = manually managed incremental state. AUTO CDC is Lakeflow primitive for applying ordered change feeds/SCD1/2 patterns when CDC semantics warrant it.
 
-### 9. Index nhưng Seq Scan
+### 9. EXPLAIN vs Query Profile
 
-Low selectivity, small table hoặc cost estimate khiến scan tuần tự rẻ hơn.
+EXPLAIN = planned execution; Query Profile = runtime execution metrics/visualization.
 
-### 10. Debug wrong revenue
+### 10. Exploding join debug
 
-Bắt đầu metric definition → input grain → filters → joins/cardinality → aggregate → reconciliation → source quality. Không bắt đầu bằng optimization.
+Metric definition → input grains → join key/cardinality → prove amplification → fix relation → validate totals → inspect plan/profile → optimize/re-measure.

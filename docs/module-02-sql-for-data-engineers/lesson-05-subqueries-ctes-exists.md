@@ -1,23 +1,41 @@
-# Lesson 05 – Subqueries, CTEs & EXISTS
+# Lesson 05 – Subqueries, CTEs & Reusable Relations in Databricks SQL
 
 ## 1. Learning objectives
 
 Sau bài này, bạn phải có thể:
 
-- Dùng scalar subquery, derived table và correlated subquery đúng mục đích.
-- Dùng CTE để chia query thành các relations trung gian có grain rõ.
-- Biết khi nào `EXISTS`/`NOT EXISTS` diễn đạt intent tốt hơn join.
-- Phân biệt readability với performance assumption: CTE không phải “optimization trick” mặc định.
-- Viết query nhiều bước theo pipeline reasoning: filter → aggregate → rank → final select.
-- Tránh repeated logic và ambiguous grain trong query dài.
+- Dùng scalar subquery, derived table và correlated subquery đúng intent.
+- Dùng CTE để chia query thành relations trung gian có grain/key rõ.
+- So sánh `EXISTS`/`NOT EXISTS` với Databricks SEMI/ANTI JOIN.
+- Không coi CTE là optimization trick mặc định.
+- Nhận biết `WITH RECURSIVE` trong Databricks Runtime/SQL hiện đại ở mức awareness.
+- Viết query nhiều bước theo Data Engineering pipeline reasoning.
 
 ---
 
-## 2. Principles
+## 2. Source alignment
 
-### Principle 1 – Decompose by meaning, not by line count
+### Primary Databricks sources
 
-Một CTE tốt nên đại diện cho một relation có tên và grain rõ:
+- Query / CTE  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-query  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-cte
+- JOIN / SEMI / ANTI  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-join
+- EXPLAIN  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-explain
+
+### Version note
+
+Databricks hỗ trợ recursive CTE với `WITH RECURSIVE` ở các runtime/version hiện hành được ghi trong official docs. Luôn đọc `Applies to` trước khi dùng feature version-sensitive.
+
+---
+
+## 3. Principles
+
+### Principle 1 – Decompose by relation meaning
+
+CTE tốt:
 
 ```text
 successful_billing
@@ -26,229 +44,250 @@ latest_status
 active_subscriptions
 ```
 
-Đừng chia query thành 10 CTE chỉ vì mỗi CTE ngắn hơn.
+CTE kém:
 
-### Principle 2 – Each intermediate relation needs a contract
+```text
+t1
+step2
+abc
+```
 
-Với mỗi CTE, bạn nên nói được:
+Tên nên mô tả **meaning**, không chỉ thứ tự.
+
+### Principle 2 – Every intermediate relation has a contract
+
+Với mỗi CTE:
 
 ```text
 Purpose:
 Grain:
-Key:
+Business key:
 Filters:
 Expected uniqueness:
 ```
 
-### Principle 3 – EXISTS answers existence
+Nếu CTE tên `latest_customer_status` nhưng vẫn 3 rows/customer, tên không làm query đúng.
 
-Nếu business question là “có hay không”, dùng relation semantics của existence. Join chỉ để check existence có thể nhân rows rồi lại cần DISTINCT.
+### Principle 3 – Existence should stay existence
 
-### Principle 4 – Readability first, planner behavior second
+Nếu câu hỏi là “có match hay không”, `EXISTS`, `LEFT SEMI JOIN`, `NOT EXISTS`, `LEFT ANTI JOIN` thường rõ hơn join + `DISTINCT`.
 
-Modern SQL engines có thể inline/materialize CTE khác nhau tùy engine/version/query. Đừng học thuộc câu “CTE luôn chậm” hoặc “CTE luôn materialize”. Hãy dùng `EXPLAIN` để xác nhận khi performance quan trọng.
+### Principle 4 – Syntax does not guarantee execution strategy
+
+Không học thuộc:
+
+```text
+CTE always materializes
+CTE always inlines
+correlated subquery always slow
+JOIN always faster than EXISTS
+```
+
+Databricks optimizer quyết định plan. Khi performance quan trọng → `EXPLAIN` / Query Profile.
 
 ---
 
-## 3. Fundamentals
+## 4. Fundamentals
 
-### 3.1 Scalar subquery
-
-Trả một value:
+### 4.1 Scalar subquery
 
 ```sql
 SELECT
-    customer_id,
-    amount,
-    (SELECT AVG(amount)
-     FROM billing_transactions
-     WHERE status = 'success') AS global_avg
+  transaction_id,
+  amount,
+  (SELECT AVG(amount)
+   FROM billing_transactions
+   WHERE status = 'success') AS global_success_avg
 FROM billing_transactions;
 ```
 
-Nếu subquery trả nhiều hơn một row trong ngữ cảnh scalar, query lỗi.
+Scalar context yêu cầu một scalar result.
 
-### 3.2 Derived table
-
-Subquery trong `FROM` tạo relation:
+### 4.2 Derived table
 
 ```sql
 SELECT *
 FROM (
-    SELECT customer_id, SUM(amount) AS revenue
-    FROM billing_transactions
-    WHERE status = 'success'
-    GROUP BY customer_id
+  SELECT customer_id, SUM(amount) AS revenue
+  FROM billing_transactions
+  WHERE status = 'success'
+  GROUP BY customer_id
 ) r
-WHERE r.revenue >= 200000;
+WHERE revenue >= 200000;
 ```
 
-### 3.3 Correlated subquery
+Subquery trong `FROM` là relation có thể join/filter tiếp.
 
-Subquery tham chiếu outer row:
+### 4.3 Correlated EXISTS
 
 ```sql
-SELECT c.customer_id
+SELECT c.customer_id, c.full_name
 FROM customers c
 WHERE EXISTS (
-    SELECT 1
-    FROM billing_transactions b
-    WHERE b.customer_id = c.customer_id
-      AND b.status = 'success'
+  SELECT 1
+  FROM billing_transactions b
+  WHERE b.customer_id = c.customer_id
+    AND b.status = 'success'
 );
 ```
 
-Logical meaning: với mỗi customer, hỏi có row phù hợp tồn tại không.
+Logical meaning:
 
-Engine có thể rewrite thành plan hiệu quả; không nên suy luận runtime chỉ từ syntax.
+> với customer hiện tại, có ít nhất một matching transaction không?
 
-### 3.4 CTE
+### 4.4 CTE pipeline
 
 ```sql
 WITH successful_billing AS (
-    SELECT *
-    FROM billing_transactions
-    WHERE status = 'success'
+  SELECT
+    transaction_id,
+    customer_id,
+    amount
+  FROM billing_transactions
+  WHERE status = 'success'
 ),
 revenue_by_customer AS (
-    SELECT
-        customer_id,
-        SUM(amount) AS revenue
-    FROM successful_billing
-    GROUP BY customer_id
+  SELECT
+    customer_id,
+    COUNT(*) AS txn_count,
+    SUM(amount) AS revenue
+  FROM successful_billing
+  GROUP BY customer_id
 )
 SELECT *
 FROM revenue_by_customer
 WHERE revenue >= 200000;
 ```
 
-CTE ở đây giúp expose pipeline logic.
+### 4.5 CTE + validation
 
-### 3.5 CTE naming
+Không chỉ viết result:
 
-Tên tốt:
-
-```text
-successful_transactions
-revenue_by_customer
-customer_with_plan
+```sql
+WITH active_subscriptions AS (...)
+SELECT customer_id, COUNT(*)
+FROM active_subscriptions
+GROUP BY customer_id
+HAVING COUNT(*) > 1;
 ```
 
-Tên kém:
+Nếu business assumption là 1 current subscription/customer, check này phải trả 0 rows.
 
-```text
-t1
-cte2
-temp
-abc
+### 4.6 EXISTS vs LEFT SEMI JOIN
+
+Databricks-native equivalent intent:
+
+```sql
+SELECT c.*
+FROM customers c
+LEFT SEMI JOIN billing_transactions b
+  ON b.customer_id = c.customer_id
+ AND b.status = 'success';
 ```
 
-Trong interview, tên relation rõ giúp interviewer theo reasoning.
+`EXISTS` thường đọc tự nhiên trong predicate logic; SEMI JOIN thường đọc tự nhiên khi thinking in relations. Chọn form rõ intent và team convention.
 
-### 3.6 `IN` vs `EXISTS`
+### 4.7 Recursive CTE awareness
 
-Cả hai có thể biểu đạt membership/existence. Nhưng cần chú ý NULL semantics, đặc biệt `NOT IN`.
+Recursive CTE hữu ích cho:
 
-Khi relation phụ có thể chứa NULL và intent là anti-join, `NOT EXISTS` thường dễ reasoning an toàn hơn.
+- hierarchy;
+- parent-child traversal;
+- graph/dependency chain;
+- bill-of-materials-like structures.
 
-### 3.7 Recursive CTE – awareness level
+Concept:
 
-Recursive CTE dùng cho hierarchy/graph-like traversal như org tree, category tree hoặc dependency chain.
+```text
+base case
+UNION ALL
+recursive step referencing CTE
+termination / recursion limit
+```
 
-Module này chỉ cần nhận biết, không bắt buộc luyện sâu cho VDT fresher DE.
+VDT fresher chỉ cần hiểu use case và danger of non-termination/explosion, chưa cần luyện graph SQL sâu.
 
 ---
 
-## 4. Worked example – Revenue from active-plan customers
+## 5. Worked example – Revenue by active plan
 
-### Business question
-
-> Tổng successful revenue theo plan hiện tại là bao nhiêu?
-
-Ta chia thành relations:
+### Relations
 
 ```text
 active_subscriptions
-Grain: 1 row / current subscription
+Grain: 1 row / active subscription
 
 successful_billing
 Grain: 1 row / successful transaction
 
-billing_with_active_plan
-Grain: transaction, nếu mỗi customer chỉ có 1 active subscription theo rule hiện tại
+final
+Grain: 1 row / plan
 ```
 
 ```sql
 WITH active_subscriptions AS (
-    SELECT
-        subscription_id,
-        customer_id,
-        plan_id
-    FROM subscriptions
-    WHERE status = 'active'
-      AND ended_at IS NULL
+  SELECT customer_id, plan_id
+  FROM subscriptions
+  WHERE status = 'active'
+    AND ended_at IS NULL
 ),
 successful_billing AS (
-    SELECT
-        transaction_id,
-        customer_id,
-        amount
-    FROM billing_transactions
-    WHERE status = 'success'
+  SELECT customer_id, amount
+  FROM billing_transactions
+  WHERE status = 'success'
 )
 SELECT
-    p.plan_name,
-    SUM(b.amount) AS revenue
+  p.plan_name,
+  SUM(b.amount) AS successful_revenue
 FROM successful_billing b
 JOIN active_subscriptions s
   ON s.customer_id = b.customer_id
 JOIN plans p
   ON p.plan_id = s.plan_id
 GROUP BY p.plan_name
-ORDER BY revenue DESC;
+ORDER BY successful_revenue DESC;
 ```
 
-### Validation question
+### Correctness gate
 
-Trước khi tin query, kiểm tra:
+Trước khi tin final:
 
 ```sql
-SELECT customer_id, COUNT(*)
-FROM subscriptions
-WHERE status = 'active'
-  AND ended_at IS NULL
+WITH active_subscriptions AS (
+  SELECT customer_id, plan_id
+  FROM subscriptions
+  WHERE status = 'active'
+    AND ended_at IS NULL
+)
+SELECT customer_id, COUNT(*) AS active_rows
+FROM active_subscriptions
 GROUP BY customer_id
 HAVING COUNT(*) > 1;
 ```
 
-Nếu trả rows, active-subscription relation không unique/customer; join có thể fan-out.
-
-CTE không cứu correctness nếu grain assumption sai.
+Nếu có rows → final join có thể fan-out. CTE không tự đảm bảo grain.
 
 ---
 
-## 5. Hands-on lab
+## 6. Hands-on lab
 
-Tạo `lesson-05.sql`.
+### Part A – Subqueries
 
-### Part A – Subquery
+1. Successful transaction có amount > global successful average.
+2. Customer revenue > average revenue/customer.
+3. Tower drop count > average drop count/tower.
 
-1. Transaction có amount lớn hơn average successful amount.
-2. Customer có successful revenue lớn hơn average revenue/customer.
-3. Tower có số `call_drop` lớn hơn average drop count/tower.
+### Part B – Existence
 
-### Part B – EXISTS
-
-1. Customer có ít nhất một successful transaction.
-2. Customer có active subscription nhưng chưa successful transaction.
-3. Tower có event nhưng không có `call_drop`.
-4. Plan đang được ít nhất một customer sử dụng.
-
-Viết mỗi bài bằng `EXISTS`/`NOT EXISTS`. Sau đó thử viết bằng join và so sánh clarity/cardinality.
+4. Customer có successful payment bằng `EXISTS`.
+5. Viết lại bằng `LEFT SEMI JOIN`.
+6. Customer có active subscription nhưng không successful payment bằng `NOT EXISTS`.
+7. Viết lại bằng `LEFT ANTI JOIN`.
+8. So row count/output semantics của hai form.
 
 ### Part C – CTE pipeline
 
-Viết query gồm ít nhất 3 CTE:
+9. Viết >=3 CTE:
 
 ```text
 successful_billing
@@ -267,73 +306,71 @@ revenue
 revenue_band
 ```
 
-Rule revenue band:
+10. Mỗi CTE phải có comment `grain/key`.
+11. Thêm validation CTE/query để prove final 1 row/customer.
 
-- `<100k`: low;
-- `100k–<500k`: medium;
-- `>=500k`: high.
+### Part D – Data-quality relation
 
-### Part D – Data-quality CTE
-
-Tạo CTE:
+12. Tạo `duplicate_network_event_ids` chứa:
 
 ```text
-duplicate_network_event_ids
+event_id
+row_count
+max_payload_version
+latest_ingested_at
 ```
 
-chứa `event_id`, row_count, max payload_version, latest ingested_at cho event bị duplicate.
+### Challenge – Recursive CTE awareness
 
-### Challenge
+Tạo một tiny `VALUES` hierarchy:
 
-Viết query trả province có:
+```text
+node_id | parent_id
+```
 
-- ít nhất 2 customers;
-- ít nhất 1 successful transaction;
-- total revenue cao hơn average revenue/province.
-
-Bắt buộc chia thành các CTE có comment grain.
+Nếu runtime hỗ trợ recursive CTE, thử traverse từ root. Nếu environment không support version đó, chỉ viết pseudo-SQL và giải thích base/recursive step.
 
 ---
 
-## 6. Knowledge check – MCQ
+## 7. Knowledge check – MCQ
 
-**Q1.** CTE tốt nhất nên đại diện cho:  
-A. một relation trung gian có purpose/grain rõ; B. mỗi dòng SQL; C. một index; D. một transaction DB.
+**Q1.** CTE tốt nên đại diện:  
+A. relation trung gian có meaning/grain rõ; B. mỗi line SQL; C. index; D. file partition.
 
-**Q2.** Business question “customer nào có ít nhất một payment?” phù hợp tự nhiên với:  
-A. EXISTS; B. CROSS JOIN; C. ORDER BY; D. UNION ALL bắt buộc.
+**Q2.** CTE có tự enforce uniqueness không?  
+A. Có; B. Không; C. chỉ Delta; D. chỉ SQL Warehouse.
 
-**Q3.** `NOT IN` nguy hiểm hơn khi subquery có:  
-A. NULL; B. integer; C. primary key; D. ORDER BY.
+**Q3.** Business question “có transaction không?” phù hợp với:  
+A. EXISTS hoặc SEMI JOIN; B. CROSS JOIN; C. CUBE; D. MERGE bắt buộc.
 
-**Q4.** CTE có đảm bảo input bên trong unique không?  
-A. Có; B. Không, uniqueness vẫn phải kiểm chứng; C. chỉ PostgreSQL; D. chỉ khi tên có `unique`.
+**Q4.** “CTE luôn materialize” là:  
+A. universal rule; B. assumption không nên dùng; xem optimizer/plan; C. Databricks guarantee; D. Delta constraint.
 
-**Q5.** Nhận định “CTE luôn materialize và luôn chậm” là:  
-A. universal SQL law; B. không nên mặc định, phụ thuộc engine/planner/query; C. luôn đúng; D. đúng với mọi cloud DW.
+**Q5.** Recursive CTE cần:  
+A. base + recursive step + termination reasoning; B. index; C. Photon off; D. MERGE.
 
-**Q6.** Scalar subquery trong scalar context phải:  
-A. trả đúng một value/row theo yêu cầu context; B. luôn 100 rows; C. dùng GROUP BY; D. có JOIN.
-
----
-
-## 7. Knowledge check – Tự luận / Interview
-
-1. Khi nào CTE tăng readability nhưng không làm query đúng hơn?
-2. `EXISTS` khác join + DISTINCT ở semantics và reasoning thế nào?
-3. Correlated subquery là gì?
-4. Vì sao query nhiều CTE vẫn có thể double-count?
-5. Khi nào bạn chọn derived table thay vì CTE?
-6. Hãy mô tả một query 4 bước như pipeline relations mà không viết SQL.
-7. Tại sao không nên tối ưu query dựa trên assumption “syntax X luôn nhanh hơn syntax Y” mà chưa xem plan?
+**Q6.** `NOT EXISTS` và LEFT ANTI JOIN chủ yếu diễn đạt:  
+A. absence of match; B. full outer result; C. ranking; D. aggregation.
 
 ---
 
-## 8. Exit criteria
+## 8. Tự luận / Interview
 
-- [ ] Mỗi CTE lab có comment grain/key.
-- [ ] Viết được semi-join và anti-join bằng EXISTS.
-- [ ] Không dùng `NOT IN` thiếu suy nghĩ khi relation có thể chứa NULL.
-- [ ] Viết được query pipeline >=3 CTE mà mỗi bước có purpose rõ.
-- [ ] Tự kiểm tra uniqueness trước join CTE.
-- [ ] Đạt ít nhất 5/6 MCQ.
+1. Vì sao CTE tăng readability nhưng không đảm bảo correctness?
+2. CTE contract nên chứa gì?
+3. EXISTS vs SEMI JOIN khác nhau về cách diễn đạt thế nào?
+4. Tại sao không đoán performance từ syntax alone?
+5. Recursive CTE phù hợp use case nào?
+6. Query nhiều CTE vẫn double-count bằng cách nào?
+
+---
+
+## 9. Exit criteria
+
+- [ ] Mỗi CTE có purpose/grain/key.
+- [ ] Dùng EXISTS/NOT EXISTS.
+- [ ] Dùng SEMI/ANTI JOIN tương đương intent.
+- [ ] Viết >=3-step CTE pipeline có validation.
+- [ ] Hiểu recursive CTE awareness/version sensitivity.
+- [ ] Không phát biểu performance universal từ syntax.
+- [ ] Đạt >=5/6 MCQ.

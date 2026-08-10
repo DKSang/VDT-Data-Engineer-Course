@@ -1,0 +1,165 @@
+-- Module 02 primary lab setup for Databricks SQL / Databricks Runtime
+-- Run this file in a schema where you have CREATE TABLE permission.
+-- Optional:
+-- USE CATALOG <your_catalog>;
+-- CREATE SCHEMA IF NOT EXISTS vdt_course;
+-- USE SCHEMA vdt_course;
+
+CREATE OR REPLACE TABLE customers (
+    customer_id BIGINT,
+    full_name STRING,
+    province STRING,
+    birth_date DATE,
+    registered_at TIMESTAMP,
+    email STRING,
+    segment STRING,
+    updated_at TIMESTAMP
+) USING DELTA;
+
+CREATE OR REPLACE TABLE plans (
+    plan_id INT,
+    plan_name STRING,
+    monthly_fee DECIMAL(12,2),
+    data_quota_gb DECIMAL(10,2),
+    plan_type STRING
+) USING DELTA;
+
+CREATE OR REPLACE TABLE subscriptions (
+    subscription_id BIGINT,
+    customer_id BIGINT,
+    plan_id INT,
+    started_at TIMESTAMP,
+    ended_at TIMESTAMP,
+    status STRING,
+    updated_at TIMESTAMP
+) USING DELTA;
+
+CREATE OR REPLACE TABLE billing_transactions (
+    transaction_id BIGINT,
+    customer_id BIGINT,
+    transaction_ts TIMESTAMP,
+    amount DECIMAL(14,2),
+    transaction_type STRING,
+    payment_method STRING,
+    status STRING,
+    updated_at TIMESTAMP
+) USING DELTA;
+
+CREATE OR REPLACE TABLE cell_towers (
+    tower_id INT,
+    tower_name STRING,
+    province STRING,
+    technology STRING,
+    commissioned_at DATE
+) USING DELTA;
+
+-- event_id deliberately NOT unique: the lab needs duplicate/versioned business events.
+CREATE OR REPLACE TABLE network_events (
+    ingest_row_id BIGINT,
+    event_id STRING,
+    tower_id INT,
+    customer_id BIGINT,
+    event_type STRING,
+    event_ts TIMESTAMP,
+    ingested_at TIMESTAMP,
+    signal_dbm DECIMAL(8,2),
+    duration_seconds INT,
+    payload_version INT
+) USING DELTA;
+
+CREATE OR REPLACE TABLE customer_status_history (
+    status_history_id BIGINT,
+    customer_id BIGINT,
+    status STRING,
+    effective_from TIMESTAMP,
+    recorded_at TIMESTAMP,
+    source_system STRING
+) USING DELTA;
+
+INSERT INTO customers VALUES
+(1001, 'Nguyen An',   'Ha Noi',    DATE '2001-04-12', TIMESTAMP '2025-01-10 09:00:00', 'an@example.com',   'mass',    TIMESTAMP '2026-08-01 10:00:00'),
+(1002, 'Tran Binh',   'Ha Noi',    DATE '1999-08-20', TIMESTAMP '2025-02-11 11:30:00', NULL,               'mass',    TIMESTAMP '2026-07-29 08:00:00'),
+(1003, 'Le Chi',      'Da Nang',   DATE '2002-01-15', TIMESTAMP '2025-03-05 14:20:00', 'chi@example.com',  'student', TIMESTAMP '2026-08-02 09:00:00'),
+(1004, 'Pham Dung',   'HCM',       DATE '1997-12-01', TIMESTAMP '2025-03-18 18:00:00', 'dung@example.com', 'premium', TIMESTAMP '2026-08-03 09:00:00'),
+(1005, 'Hoang Giang', 'HCM',       DATE '2000-06-30', TIMESTAMP '2025-04-09 07:30:00', NULL,               'student', TIMESTAMP '2026-08-04 09:00:00'),
+(1006, 'Do Ha',       'Hai Phong', DATE '1998-03-22', TIMESTAMP '2025-06-10 10:00:00', 'ha@example.com',   'mass',    TIMESTAMP '2026-08-05 09:00:00'),
+(1007, 'Bui Khanh',   'Da Nang',   DATE '2003-09-17', TIMESTAMP '2025-07-01 10:00:00', 'k@example.com',    NULL,      TIMESTAMP '2026-08-06 09:00:00'),
+(1008, 'Vu Lan',      'HCM',       NULL,              TIMESTAMP '2025-08-22 16:00:00', 'lan@example.com',  'premium', TIMESTAMP '2026-08-07 09:00:00');
+
+INSERT INTO plans VALUES
+(1, 'STUDENT10', DECIMAL(100000,12,2), DECIMAL(10,10,2), 'prepaid'),
+(2, 'FAMILY30',  DECIMAL(300000,12,2), DECIMAL(30,10,2), 'postpaid'),
+(3, 'PREMIUM80', DECIMAL(800000,12,2), DECIMAL(80,10,2), 'postpaid'),
+(4, 'BASIC5',    DECIMAL(50000,12,2),  DECIMAL(5,10,2),  'prepaid');
+
+INSERT INTO subscriptions VALUES
+(2001,1001,2,TIMESTAMP '2025-01-10 00:00:00',NULL,                              'active',    TIMESTAMP '2026-08-01 00:00:00'),
+(2002,1002,4,TIMESTAMP '2025-02-11 00:00:00',TIMESTAMP '2026-06-30 00:00:00', 'cancelled', TIMESTAMP '2026-06-30 00:00:00'),
+(2003,1002,1,TIMESTAMP '2026-07-01 00:00:00',NULL,                              'active',    TIMESTAMP '2026-07-29 00:00:00'),
+(2004,1003,1,TIMESTAMP '2025-03-05 00:00:00',NULL,                              'active',    TIMESTAMP '2026-08-02 00:00:00'),
+(2005,1004,3,TIMESTAMP '2025-03-18 00:00:00',NULL,                              'active',    TIMESTAMP '2026-08-03 00:00:00'),
+(2006,1005,1,TIMESTAMP '2025-04-09 00:00:00',NULL,                              'suspended', TIMESTAMP '2026-08-04 00:00:00'),
+(2007,1006,2,TIMESTAMP '2025-06-10 00:00:00',NULL,                              'active',    TIMESTAMP '2026-08-05 00:00:00'),
+(2008,1007,4,TIMESTAMP '2025-07-01 00:00:00',NULL,                              'active',    TIMESTAMP '2026-08-06 00:00:00'),
+(2009,1008,3,TIMESTAMP '2025-08-22 00:00:00',NULL,                              'active',    TIMESTAMP '2026-08-07 00:00:00');
+
+INSERT INTO billing_transactions VALUES
+(3001,1001,TIMESTAMP '2026-08-01 08:15:00',DECIMAL(300000,14,2),'monthly_fee','bank',  'success',  TIMESTAMP '2026-08-01 08:16:00'),
+(3002,1002,TIMESTAMP '2026-08-01 09:00:00',DECIMAL(100000,14,2),'topup',      'wallet','success',  TIMESTAMP '2026-08-01 09:00:00'),
+(3003,1003,TIMESTAMP '2026-08-01 10:30:00',DECIMAL(100000,14,2),'monthly_fee','wallet','success',  TIMESTAMP '2026-08-01 10:31:00'),
+(3004,1004,TIMESTAMP '2026-08-01 12:00:00',DECIMAL(800000,14,2),'monthly_fee','card',  'success',  TIMESTAMP '2026-08-01 12:00:00'),
+(3005,1005,TIMESTAMP '2026-08-01 13:10:00',DECIMAL(100000,14,2),'monthly_fee',NULL,    'failed',   TIMESTAMP '2026-08-01 13:11:00'),
+(3006,1006,TIMESTAMP '2026-08-02 08:05:00',DECIMAL(300000,14,2),'monthly_fee','bank',  'success',  TIMESTAMP '2026-08-02 08:06:00'),
+(3007,1007,TIMESTAMP '2026-08-02 11:20:00',DECIMAL(50000,14,2), 'topup',      'wallet','success',  TIMESTAMP '2026-08-02 11:20:00'),
+(3008,1008,TIMESTAMP '2026-08-02 14:00:00',DECIMAL(800000,14,2),'monthly_fee','card',  'success',  TIMESTAMP '2026-08-02 14:01:00'),
+(3009,1001,TIMESTAMP '2026-08-03 07:45:00',DECIMAL(50000,14,2), 'addon',      'wallet','success',  TIMESTAMP '2026-08-03 07:45:00'),
+(3010,1004,TIMESTAMP '2026-08-03 18:10:00',DECIMAL(100000,14,2),'addon',      'card',  'refunded', TIMESTAMP '2026-08-04 09:00:00'),
+(3011,1003,TIMESTAMP '2026-08-04 09:30:00',DECIMAL(20000,14,2), 'topup',      'wallet','success',  TIMESTAMP '2026-08-04 09:30:00'),
+(3012,1006,TIMESTAMP '2026-08-04 10:00:00',DECIMAL(50000,14,2), 'addon',      'bank',  'success',  TIMESTAMP '2026-08-04 10:00:00'),
+(3013,1001,TIMESTAMP '2026-08-05 09:00:00',DECIMAL(30000,14,2), 'topup',      'wallet','success',  TIMESTAMP '2026-08-05 09:00:00'),
+(3014,1002,TIMESTAMP '2026-08-05 11:00:00',DECIMAL(40000,14,2), 'topup',      'wallet','failed',   TIMESTAMP '2026-08-05 11:01:00'),
+(3015,1008,TIMESTAMP '2026-08-06 15:00:00',DECIMAL(120000,14,2),'addon',      'card',  'success',  TIMESTAMP '2026-08-06 15:00:00');
+
+INSERT INTO cell_towers VALUES
+(501,'HN-CG-01','Ha Noi','5G',DATE '2024-01-10'),
+(502,'HN-HBT-02','Ha Noi','4G',DATE '2021-04-20'),
+(503,'DN-HC-01','Da Nang','5G',DATE '2025-02-01'),
+(504,'HCM-Q1-01','HCM','5G',DATE '2024-06-15'),
+(505,'HCM-TD-03','HCM','4G',DATE '2020-11-01');
+
+INSERT INTO network_events VALUES
+(1, 'e001',501,1001,'call_start',TIMESTAMP '2026-08-05 10:00:00',TIMESTAMP '2026-08-05 10:00:02',DECIMAL(-72,8,2),  0,1),
+(2, 'e002',501,1001,'call_end',  TIMESTAMP '2026-08-05 10:04:00',TIMESTAMP '2026-08-05 10:04:01',DECIMAL(-75,8,2),240,1),
+(3, 'e003',501,1002,'call_drop', TIMESTAMP '2026-08-05 10:06:00',TIMESTAMP '2026-08-05 10:06:03',DECIMAL(-105,8,2),45,1),
+(4, 'e004',502,1002,'call_end',  TIMESTAMP '2026-08-05 10:09:00',TIMESTAMP '2026-08-05 10:09:01',DECIMAL(-82,8,2),180,1),
+(5, 'e005',503,1003,'call_drop', TIMESTAMP '2026-08-05 10:10:00',TIMESTAMP '2026-08-05 10:12:30',DECIMAL(-110,8,2),30,1),
+(6, 'e006',503,1007,'call_end',  TIMESTAMP '2026-08-05 10:11:00',TIMESTAMP '2026-08-05 10:11:01',DECIMAL(-80,8,2),300,1),
+(7, 'e007',504,1004,'call_end',  TIMESTAMP '2026-08-05 10:12:00',TIMESTAMP '2026-08-05 10:12:01',DECIMAL(-68,8,2),420,1),
+(8, 'e008',504,1005,'call_drop', TIMESTAMP '2026-08-05 10:14:00',TIMESTAMP '2026-08-05 10:14:02',DECIMAL(-112,8,2),20,1),
+(9, 'e009',505,1008,'call_drop', TIMESTAMP '2026-08-05 10:15:00',TIMESTAMP '2026-08-05 10:15:05',DECIMAL(-108,8,2),50,1),
+(10,'e010',505,1008,'call_end',  TIMESTAMP '2026-08-05 10:18:00',TIMESTAMP '2026-08-05 10:18:01',DECIMAL(-85,8,2),180,1),
+(11,'e009',505,1008,'call_drop', TIMESTAMP '2026-08-05 10:15:00',TIMESTAMP '2026-08-05 10:20:00',DECIMAL(-108,8,2),50,1),
+(12,'e005',503,1003,'call_drop', TIMESTAMP '2026-08-05 10:10:00',TIMESTAMP '2026-08-05 10:25:00',DECIMAL(-107,8,2),30,2),
+(13,'e011',501,1006,'call_end',  TIMESTAMP '2026-08-05 08:00:00',TIMESTAMP '2026-08-05 13:00:00',DECIMAL(-79,8,2),200,1);
+
+INSERT INTO customer_status_history VALUES
+(1,1001,'active',   TIMESTAMP '2025-01-10 00:00:00',TIMESTAMP '2025-01-10 09:01:00','crm'),
+(2,1002,'active',   TIMESTAMP '2025-02-11 00:00:00',TIMESTAMP '2025-02-11 11:31:00','crm'),
+(3,1002,'inactive', TIMESTAMP '2026-06-30 00:00:00',TIMESTAMP '2026-06-30 18:00:00','crm'),
+(4,1002,'active',   TIMESTAMP '2026-07-01 00:00:00',TIMESTAMP '2026-07-01 08:00:00','crm'),
+(5,1003,'active',   TIMESTAMP '2025-03-05 00:00:00',TIMESTAMP '2025-03-05 14:21:00','crm'),
+(6,1004,'active',   TIMESTAMP '2025-03-18 00:00:00',TIMESTAMP '2025-03-18 18:01:00','crm'),
+(7,1005,'active',   TIMESTAMP '2025-04-09 00:00:00',TIMESTAMP '2025-04-09 07:31:00','crm'),
+(8,1005,'suspended',TIMESTAMP '2026-08-01 00:00:00',TIMESTAMP '2026-08-01 12:00:00','risk'),
+(9,1006,'active',   TIMESTAMP '2025-06-10 00:00:00',TIMESTAMP '2025-06-10 10:01:00','crm'),
+(10,1007,'active',  TIMESTAMP '2025-07-01 00:00:00',TIMESTAMP '2025-07-01 10:01:00','crm'),
+(11,1008,'active',  TIMESTAMP '2025-08-22 00:00:00',TIMESTAMP '2025-08-22 16:01:00','crm');
+
+-- Sanity checks
+SELECT 'customers' AS table_name, COUNT(*) AS row_count FROM customers
+UNION ALL SELECT 'plans', COUNT(*) FROM plans
+UNION ALL SELECT 'subscriptions', COUNT(*) FROM subscriptions
+UNION ALL SELECT 'billing_transactions', COUNT(*) FROM billing_transactions
+UNION ALL SELECT 'cell_towers', COUNT(*) FROM cell_towers
+UNION ALL SELECT 'network_events', COUNT(*) FROM network_events
+UNION ALL SELECT 'customer_status_history', COUNT(*) FROM customer_status_history;

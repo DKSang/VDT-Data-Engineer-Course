@@ -1,5 +1,30 @@
 # Module 02 – SQL for Data Engineers
 
+## Official Databricks sources
+
+### Primary
+
+Databricks SQL là canonical SQL reference của module:
+
+- Databricks SQL Language Reference  
+  https://docs.databricks.com/aws/en/sql/language-manual
+- Window Functions  
+  https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-window-functions
+- Data Engineering Concepts  
+  https://docs.databricks.com/aws/en/data-engineering/concepts
+- Query Data on Databricks  
+  https://docs.databricks.com/aws/en/query
+
+### Databricks Academy alignment
+
+SQL là prerequisite xuyên suốt Data Engineer learning content. Các course như Lakeflow Connect và Lakeflow Jobs giả định người học đã có SQL ở mức thực dụng/intermediate, vì vậy module này được đặt trước Spark/Lakeflow để xây nền chắc hơn mức prerequisite đó.
+
+### Supplementary prerequisite / lab engine
+
+Lab vẫn sử dụng **PostgreSQL** để có môi trường local nhẹ, dễ quan sát indexes và `EXPLAIN`. PostgreSQL docs chỉ dùng để giải thích behavior riêng của PostgreSQL planner/index implementation; SQL concept và terminology chung của khóa ưu tiên Databricks SQL reference.
+
+---
+
 ## Vì sao SQL đứng trước Python/Spark?
 
 SQL là ngôn ngữ trung tâm của Data Engineering vì phần lớn pipeline cuối cùng vẫn phải trả lời các câu hỏi quan hệ: dữ liệu ở grain nào, join theo key nào, aggregate ra sao, xử lý NULL thế nào, chọn bản ghi mới nhất bằng quy tắc nào, và làm sao chứng minh query đúng trước khi tối ưu.
@@ -12,9 +37,13 @@ Module này vì vậy không dạy SQL theo kiểu `SELECT → JOIN → GROUP BY
 2. **Reasoning** – có giải thích được vì sao đúng không?
 3. **Performance** – khi dữ liệu lớn, engine thực thi ra sao và tối ưu bằng cách nào?
 
-## Reference engine
+## Reference engine vs canonical language reference
 
-Lab sử dụng **PostgreSQL** vì dễ chạy local, hỗ trợ SQL phong phú, window functions, CTE, indexes và `EXPLAIN`. Tuy nhiên principle trong module ưu tiên SQL chuẩn và relational reasoning để có thể chuyển sang Databricks SQL, Spark SQL, Microsoft Fabric Warehouse hoặc các analytical engines khác.
+- **Canonical language/semantics:** Databricks SQL Language Reference.
+- **Local execution engine:** PostgreSQL.
+- **Mục tiêu portability:** viết và reasoning theo relational/SQL fundamentals, sau đó nhận diện dialect-specific differences khi chuyển sang Databricks SQL/Spark SQL/Fabric Warehouse.
+
+Khi syntax hoặc behavior khác nhau giữa PostgreSQL và Databricks SQL, lesson phải ghi rõ engine scope thay vì giả định hai hệ giống hệt nhau.
 
 ## Learning outcomes
 
@@ -30,22 +59,23 @@ Hoàn thành Module 02, bạn phải có thể:
 - Chọn `EXISTS`, `IN`, subquery, CTE hoặc join theo mục tiêu thay vì thói quen.
 - Sử dụng `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD` và window aggregate.
 - Viết các pattern DE quan trọng: latest-row, dedup, top-N, running totals, incremental candidate set, SCD Type 1/2 reasoning.
-- Đọc `EXPLAIN` ở mức fresher: scan, join, sort, aggregate, estimated rows, actual rows.
+- Đọc `EXPLAIN` ở mức fresher trên PostgreSQL lab: scan, join, sort, aggregate, estimated rows, actual rows.
 - Giải thích index, composite index, selectivity, sargability và vì sao index không phải lúc nào cũng được dùng.
+- Chuyển một solution SQL sang tư duy tương thích với Databricks SQL/Spark SQL mà không phụ thuộc PostgreSQL-specific shortcut.
 - Giải bài SQL interview mà không phụ thuộc vào việc học thuộc template.
 
 ## Lesson map
 
-| Lesson | Chủ đề | Câu hỏi trọng tâm |
-|---|---|---|
-| 01 | Relational Thinking, Grain & Logical Query Processing | Trước khi viết SQL, ta đang thao tác với quan hệ nào và ở grain nào? |
-| 02 | Filtering, NULL, CASE & Data Types | Vì sao query nhìn đúng cú pháp nhưng vẫn có thể lọc sai dữ liệu? |
-| 03 | Aggregation, GROUP BY & HAVING | Làm sao aggregate đúng grain và không double-count? |
-| 04 | JOINs, Cardinality & Set Operations | Join làm thay đổi số dòng như thế nào? |
-| 05 | Subqueries, CTEs & EXISTS | Khi nào nên tách query thành các relation trung gian? |
-| 06 | Window Functions | Làm analytics trên nhóm nhưng vẫn giữ từng row thế nào? |
-| 07 | SQL Patterns for Data Engineering | Dedup, latest row, incremental, SCD và data-quality patterns viết ra sao? |
-| 08 | Indexes, EXPLAIN & Query Performance | Tại sao query chậm và cách reasoning với query plan? |
+| Lesson | Chủ đề | Câu hỏi trọng tâm | Databricks source alignment |
+|---|---|---|---|
+| 01 | Relational Thinking, Grain & Logical Query Processing | Trước khi viết SQL, ta đang thao tác với relation nào và ở grain nào? | SQL language reference |
+| 02 | Filtering, NULL, CASE & Data Types | Vì sao query nhìn đúng cú pháp nhưng vẫn có thể lọc sai dữ liệu? | SQL fundamentals / NULL semantics |
+| 03 | Aggregation, GROUP BY & HAVING | Làm sao aggregate đúng grain và không double-count? | Aggregate/data engineering concepts |
+| 04 | JOINs, Cardinality & Set Operations | Join làm thay đổi số dòng như thế nào? | Join/data engineering concepts |
+| 05 | Subqueries, CTEs & EXISTS | Khi nào nên tách query thành các relation trung gian? | SQL query language |
+| 06 | Window Functions | Làm analytics trên nhóm nhưng vẫn giữ từng row thế nào? | Databricks Window Functions |
+| 07 | SQL Patterns for Data Engineering | Dedup, latest row, incremental, SCD và data-quality patterns viết ra sao? | Data Engineering concepts / SQL |
+| 08 | Indexes, EXPLAIN & Query Performance | Tại sao query chậm và cách reasoning với query plan? | Supplementary PostgreSQL engine lab |
 
 ## Telecom SQL dataset
 
@@ -78,14 +108,15 @@ Schema và seed data nằm tại [`labs/module-02-sql`](../../labs/module-02-sql
 ## Cách học mỗi lesson
 
 ```text
-1. Đọc Principles
-2. Tự nói lại principle bằng lời của mình
-3. Học Fundamentals
-4. Chạy Worked Example
-5. Làm lab KHÔNG xem answer
-6. Làm MCQ
-7. Trả lời interview questions bằng miệng
-8. Chỉ chuyển bài khi đạt Exit Criteria
+1. Xem Source alignment
+2. Đọc Principles
+3. Tự nói lại principle bằng lời của mình
+4. Học Fundamentals
+5. Chạy Worked Example
+6. Làm lab KHÔNG xem answer
+7. Làm MCQ
+8. Trả lời interview questions bằng miệng
+9. Chỉ chuyển bài khi đạt Exit Criteria
 ```
 
 ### Quy tắc SQL của module
@@ -95,6 +126,7 @@ Schema và seed data nằm tại [`labs/module-02-sql`](../../labs/module-02-sql
 - Với join, luôn dự đoán cardinality trước khi chạy.
 - Với dedup, phải định nghĩa business key và tie-breaker.
 - Với window function, phải hiểu `PARTITION BY`, `ORDER BY`, frame.
+- Nếu dùng syntax PostgreSQL-specific, ghi chú tương đương/khác biệt với Databricks SQL khi cần.
 - Với performance, tối ưu sau khi correctness đã được chứng minh.
 
 ## Suggested pace
@@ -108,13 +140,13 @@ Schema và seed data nằm tại [`labs/module-02-sql`](../../labs/module-02-sql
 
 Không cần cố đạt số lượng bài thật lớn. Mục tiêu là với mỗi bài, bạn có thể giải thích **grain → relation → condition → cardinality → correctness → performance**.
 
-## Reference anchors
+## Engine-specific reference anchors
 
-Module tham chiếu chủ yếu tới PostgreSQL official documentation cho semantics của `SELECT`, window functions, CTE, indexes và `EXPLAIN`:
+Các nguồn dưới đây chỉ là **supplementary PostgreSQL lab references**, không còn là canonical curriculum sources:
 
 - PostgreSQL `SELECT`: https://www.postgresql.org/docs/current/sql-select.html
 - Window functions: https://www.postgresql.org/docs/current/functions-window.html
 - `EXPLAIN`: https://www.postgresql.org/docs/current/using-explain.html
 - Multicolumn indexes: https://www.postgresql.org/docs/current/indexes-multicolumn.html
 
-Các reference này dùng để xác nhận engine behavior; cách giải thích trong lesson được viết lại theo mục tiêu học Data Engineering và VDT interview.
+Nếu behavior giữa PostgreSQL và Databricks SQL khác nhau, official Databricks documentation quyết định cách khóa mô tả Databricks behavior.

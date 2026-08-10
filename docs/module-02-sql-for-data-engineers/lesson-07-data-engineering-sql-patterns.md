@@ -1,203 +1,308 @@
-# Lesson 07 – SQL Patterns for Data Engineering
+# Lesson 07 – Data Engineering SQL Patterns on Delta Lake
 
 ## 1. Learning objectives
 
 Sau bài này, bạn phải có thể:
 
-- Viết dedup có business key và deterministic tie-breaker.
-- Phân biệt exact duplicate, business duplicate và multiple valid versions.
-- Tạo latest-record snapshot từ history/event table.
-- Reasoning về incremental extraction bằng watermark.
-- Giải thích idempotency và upsert/MERGE ở mức principle.
-- Mô tả SCD Type 1 và Type 2 bằng SQL transformations.
-- Viết data-quality SQL checks cho uniqueness, completeness, referential integrity và reconciliation.
+- Viết dedup có business key và deterministic winner rule bằng Databricks SQL.
+- Phân biệt exact duplicate, business duplicate và legitimate versions.
+- Tạo latest-record snapshot bằng `QUALIFY`.
+- Reasoning về incremental candidate set, watermark, overlap và idempotency.
+- Dùng Delta Lake `MERGE INTO` cho upsert/delete pattern ở mức thực hành.
+- Giải thích vì sao source của `MERGE` phải có match semantics rõ và thường cần dedup trước.
+- Phân biệt manual `MERGE` với Lakeflow **AUTO CDC** ở mức architecture awareness.
+- Mô tả SCD Type 1/2 và point-in-time history semantics.
+- Viết SQL data-quality checks trước khi publish Silver/Gold.
 
 ---
 
-## 2. Principles
+## 2. Source alignment
 
-### Principle 1 – Dedup requires a definition of sameness
+### Primary Databricks sources
 
-Không có câu “xóa duplicate” nếu chưa trả lời:
+- Delta Lake `MERGE INTO`  
+  https://docs.databricks.com/aws/en/sql/language-manual/delta-merge-into
+- Upsert into Delta with MERGE  
+  https://docs.databricks.com/aws/en/delta/merge
+- Incremental ETL / CDC patterns  
+  https://docs.databricks.com/aws/en/ldp/transform
+- AUTO CDC APIs / SCD processing  
+  https://docs.databricks.com/aws/en/ldp/cdc
+
+### Scope note
+
+Module 02 học **SQL semantics + Delta DML**. Production ingestion, CDC ordering, streaming state và Lakeflow pipeline design sẽ được đào sâu ở Module 11.
+
+Databricks khuyến nghị Lakeflow AUTO CDC cho nhiều CDC/SCD workloads thay vì tự viết logic phức tạp bằng MERGE. Module này vẫn dạy `MERGE` vì nó là SQL primitive quan trọng và giúp hiểu upsert semantics.
+
+---
+
+## 3. Principles
+
+### Principle 1 – Dedup starts with a contract
+
+Trước `DISTINCT`, `ROW_NUMBER`, `MERGE`, hãy trả lời:
 
 ```text
-Duplicate theo key nào?
-Hai rows khác payload có còn là duplicate không?
-Giữ bản nào?
-Tie-breaker nào đáng tin?
-Có cần giữ lịch sử các versions không?
+Business key?
+What counts as the same logical record?
+Winner rule?
+Tie-breaker?
+Do we need history or only current state?
 ```
 
-### Principle 2 – Latest is a business rule, not `MAX(timestamp)` alone
+### Principle 2 – Latest depends on the time/version semantics
 
 “Latest” có thể theo:
 
-- event time;
-- source update time;
-- ingestion time;
-- effective time;
-- version number.
+```text
+event time
+source update time
+payload version
+effective time
+ingestion time
+```
 
-Chọn sai timestamp có thể biến late-arriving data thành record cũ hoặc mới sai semantics.
+Không mặc định `MAX(ingested_at)` là business latest.
 
 ### Principle 3 – Incremental processing is state management
 
-Incremental load không chỉ là:
+Watermark query:
 
 ```sql
 WHERE updated_at > last_watermark
+  AND updated_at <= run_upper_bound
 ```
 
-Nó đòi hỏi hiểu:
+chỉ là phần extraction.
 
-- state/watermark lưu ở đâu;
-- boundary `>` hay `>=`;
-- late/backdated changes;
-- retry sau partial failure;
-- delete capture;
-- idempotency.
+Một design đúng còn cần:
 
-### Principle 4 – History tables need explicit validity semantics
+```text
+state checkpoint
+retry semantics
+late/backdated updates
+delete semantics
+idempotent target write
+```
 
-SCD/history tốt phải cho phép trả lời:
+### Principle 4 – MERGE correctness begins before MERGE
 
-> Giá trị nào có hiệu lực tại thời điểm T?
+`MERGE INTO` không tự giải quyết ambiguous source duplicates.
 
-Không chỉ “row mới nhất hôm nay là gì?”.
+Nếu nhiều source rows match cùng target row, update semantics có thể ambiguous/error. Source relation phải được chuẩn hóa tới đúng business grain trước khi merge.
+
+### Principle 5 – SCD is temporal semantics, not only columns
+
+SCD Type 2 phải cho phép trả lời:
+
+> Attribute nào có hiệu lực tại timestamp T?
+
+`effective_from/effective_to` chỉ hữu ích nếu intervals không overlap/gap ngoài rule cho phép.
 
 ---
 
-## 3. Fundamentals
+## 4. Fundamentals
 
-### 3.1 Duplicate taxonomy
+### 4.1 Duplicate taxonomy
 
-**Exact duplicate:** mọi business fields giống nhau.
+**Exact duplicate**
 
-**Business duplicate:** cùng business key nhưng ingestion metadata khác.
+Selected business payload giống nhau hoàn toàn.
 
-**Versioned event:** cùng business key nhưng payload version khác; có thể là correction hợp lệ.
+**Business duplicate**
+
+Cùng business key nhưng ingestion metadata khác.
+
+**Versioned correction**
+
+Cùng business key nhưng source version/payload khác; version mới có thể là correction hợp lệ.
 
 Trong lab:
 
 ```text
-e009: duplicate business event với later ingestion
-e005: cùng event_id nhưng payload_version mới hơn và signal khác
+e009 → repeated business event with later ingestion
+e005 → newer payload_version changes signal value
 ```
 
-Vì vậy rule “giữ ingested_at mới nhất” và rule “giữ payload_version cao nhất” có thể cho cùng hoặc khác kết quả tùy data contract.
+### 4.2 Databricks dedup with QUALIFY
 
-### 3.2 Dedup with ROW_NUMBER
+Contract:
 
-Ví dụ giả định business rule:
-
-> Một `event_id` chỉ đại diện một event logic. Giữ `payload_version` cao nhất; nếu tie, giữ `ingested_at` mới nhất; nếu vẫn tie, giữ `ingest_row_id` lớn nhất.
+```text
+business key = event_id
+winner = highest payload_version
+then latest ingested_at
+then highest ingest_row_id
+```
 
 ```sql
-WITH ranked AS (
-    SELECT
-        n.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY event_id
-            ORDER BY
-                payload_version DESC,
-                ingested_at DESC,
-                ingest_row_id DESC
-        ) AS rn
-    FROM network_events n
+SELECT
+  ingest_row_id,
+  event_id,
+  tower_id,
+  customer_id,
+  event_type,
+  event_ts,
+  ingested_at,
+  signal_dbm,
+  duration_seconds,
+  payload_version
+FROM network_events
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY event_id
+  ORDER BY
+    payload_version DESC,
+    ingested_at DESC,
+    ingest_row_id DESC
+) = 1;
+```
+
+Validation:
+
+```sql
+WITH clean AS (
+  SELECT *
+  FROM network_events
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY event_id
+    ORDER BY payload_version DESC, ingested_at DESC, ingest_row_id DESC
+  ) = 1
 )
+SELECT event_id, COUNT(*) AS n
+FROM clean
+GROUP BY event_id
+HAVING COUNT(*) > 1;
+```
+
+Expected: 0 rows.
+
+### 4.3 Incremental candidate set
+
+Example run contract:
+
+```text
+last successful watermark = 2026-08-03 00:00
+run upper bound           = 2026-08-06 00:00
+interval                  = (last, upper]
+```
+
+```sql
 SELECT *
-FROM ranked
-WHERE rn = 1;
+FROM billing_transactions
+WHERE updated_at >  TIMESTAMP '2026-08-03 00:00:00'
+  AND updated_at <= TIMESTAMP '2026-08-06 00:00:00';
 ```
 
-### 3.3 Latest row per entity
+Boundary convention khác cũng hợp lệ nếu checkpoint logic nhất quán.
 
-Pattern:
+### 4.4 Overlap window
 
-```sql
-ROW_NUMBER() OVER (
-    PARTITION BY entity_key
-    ORDER BY business_effective_time DESC, tie_breaker DESC
-)
-```
-
-Nhưng trước khi áp dụng, xác nhận liệu bảng là snapshot hay history mà downstream cần point-in-time.
-
-### 3.4 Incremental candidate set
-
-Simple watermark:
-
-```sql
-SELECT ...
-FROM source
-WHERE updated_at > :last_watermark
-  AND updated_at <= :current_run_upper_bound;
-```
-
-Tách upper bound của run giúp định nghĩa một batch ổn định.
-
-Một biến thể an toàn hơn khi timestamp resolution/tie có rủi ro là composite cursor:
+Một pragmatic strategy:
 
 ```text
-(updated_at, primary_key)
+read_from = last_watermark - overlap
 ```
 
-với ordering lexicographic.
-
-### 3.5 Reprocessing overlap
-
-Một strategy thực dụng:
-
-```text
-last successful watermark - overlap window
-```
-
-rồi dedup/upsert ở target.
+rồi target dedup/upsert.
 
 Trade-off:
 
-- đọc lại một ít dữ liệu;
-- đổi lại khả năng bắt late update tốt hơn.
-
-Không giải quyết delete nếu source không expose delete semantics.
-
-### 3.6 Idempotency
-
-Một pipeline idempotent cho cùng logical input/run không tạo thêm kết quả sai khi chạy lại.
-
-Ví dụ anti-pattern:
-
-```sql
-INSERT INTO target
-SELECT * FROM source_delta;
+```text
++ catch some late/backdated updates
+- re-read more rows
+- requires idempotent target semantics
 ```
 
-Retry có thể append duplicate.
+### 4.5 Delta MERGE INTO
 
-Idempotent strategy có thể gồm:
+Create a current-state target:
 
-- overwrite partition deterministically;
-- upsert theo business key;
-- delete+insert bounded partition;
-- transactional MERGE nếu engine hỗ trợ và semantics đúng.
+```sql
+CREATE OR REPLACE TABLE customer_current (
+  customer_id BIGINT,
+  full_name STRING,
+  province STRING,
+  email STRING,
+  segment STRING,
+  updated_at TIMESTAMP
+) USING DELTA;
+```
 
-### 3.7 SCD Type 1
+Upsert:
 
-Giữ only-current state, update attributes in place.
+```sql
+MERGE INTO customer_current AS t
+USING customer_updates AS s
+ON t.customer_id = s.customer_id
+WHEN MATCHED THEN UPDATE SET
+  t.full_name = s.full_name,
+  t.province = s.province,
+  t.email = s.email,
+  t.segment = s.segment,
+  t.updated_at = s.updated_at
+WHEN NOT MATCHED THEN INSERT (
+  customer_id, full_name, province, email, segment, updated_at
+) VALUES (
+  s.customer_id, s.full_name, s.province, s.email, s.segment, s.updated_at
+);
+```
+
+Key reasoning:
+
+```text
+Target grain: 1 row/customer
+Merge key: customer_id
+Source precondition: <=1 winning source row/customer for this logical batch
+```
+
+### 4.6 Pre-deduplicate source before MERGE
+
+```sql
+WITH source_clean AS (
+  SELECT *
+  FROM customer_updates
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY customer_id
+    ORDER BY updated_at DESC
+  ) = 1
+)
+MERGE INTO customer_current t
+USING source_clean s
+ON t.customer_id = s.customer_id
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *;
+```
+
+`UPDATE SET *` / `INSERT *` thuận tiện khi schemas aligned, nhưng explicit mapping thường dễ review hơn khi serving contract quan trọng.
+
+### 4.7 Deletes
+
+Nếu source cung cấp delete signal, MERGE có thể express delete branch.
 
 Concept:
 
-```text
-customer_id | province | segment
+```sql
+WHEN MATCHED AND s.operation = 'DELETE' THEN DELETE
 ```
 
-Khi segment đổi, old value bị thay.
+Nhưng simple watermark trên surviving source rows **không tự phát hiện hard delete** nếu source không expose delete event/log.
 
-Phù hợp khi không cần historical analytical state.
+### 4.8 SCD Type 1
 
-### 3.8 SCD Type 2
+Current-only state:
 
-Giữ versions:
+```text
+customer_id | segment | updated_at
+```
+
+New value overwrites previous state.
+
+Typical manual primitive: `MERGE` update/insert.
+
+### 4.9 SCD Type 2
+
+Historical versions:
 
 ```text
 customer_sk
@@ -208,29 +313,47 @@ effective_to
 is_current
 ```
 
-Khi attribute thay đổi:
-
-1. close current version;
-2. insert new version.
-
 Point-in-time join:
 
 ```sql
 fact.customer_id = dim.customer_id
 AND fact.event_ts >= dim.effective_from
-AND fact.event_ts < COALESCE(dim.effective_to, TIMESTAMP '9999-12-31')
+AND fact.event_ts < COALESCE(dim.effective_to, TIMESTAMP '9999-12-31 00:00:00')
 ```
 
-Boundary convention cần nhất quán để tránh overlap/gap.
+Manual SCD2 SQL can become complex with out-of-order updates.
 
-### 3.9 Data-quality SQL patterns
+### 4.10 AUTO CDC awareness
+
+Lakeflow Spark Declarative Pipelines provides **AUTO CDC** for change feeds and supports SCD Type 1/2 semantics.
+
+Conceptual API inputs include:
+
+```text
+source
+keys
+sequence_by
+apply_as_deletes / operation semantics
+stored_as_scd_type
+```
+
+Why it matters:
+
+```text
+manual MERGE      → you own ordering/dedup/history logic
+AUTO CDC          → pipeline primitive handles CDC sequencing/SCD workflow
+```
+
+Do not treat AUTO CDC as magic: business keys and sequence semantics still need a correct data contract.
+
+### 4.11 Data-quality SQL patterns
 
 **Uniqueness**
 
 ```sql
-SELECT key, COUNT(*)
+SELECT business_key, COUNT(*)
 FROM table_name
-GROUP BY key
+GROUP BY business_key
 HAVING COUNT(*) > 1;
 ```
 
@@ -239,227 +362,215 @@ HAVING COUNT(*) > 1;
 ```sql
 SELECT COUNT(*)
 FROM table_name
-WHERE required_col IS NULL;
-```
-
-**Referential integrity / orphan**
-
-```sql
-SELECT f.*
-FROM fact f
-LEFT JOIN dim d ON d.key = f.key
-WHERE d.key IS NULL;
+WHERE required_column IS NULL;
 ```
 
 **Accepted values**
 
 ```sql
 SELECT status, COUNT(*)
-FROM table_name
+FROM billing_transactions
 WHERE status NOT IN ('success','failed','refunded')
 GROUP BY status;
 ```
 
+**Orphan relationship**
+
+```sql
+SELECT b.*
+FROM billing_transactions b
+LEFT ANTI JOIN customers c
+  ON c.customer_id = b.customer_id;
+```
+
 **Reconciliation**
 
-Compare row count/sum/count-distinct across source/target or levels of aggregation.
+Compare counts/sums/distinct keys across source → clean → serving.
 
 ---
 
-## 4. Worked example – Deduplicate network events then calculate drop rate
+## 5. Worked example – Dedup network events → Silver Delta table
 
-### Step 1 – Define contract
+### Step 1 – Define Silver contract
 
 ```text
-Business key: event_id
-Winner: highest payload_version
-Tie 1: latest ingested_at
-Tie 2: highest ingest_row_id
+Table: silver_network_events
+Grain: 1 row / logical event_id
+Winner: payload_version DESC, ingested_at DESC, ingest_row_id DESC
 ```
 
-### Step 2 – Build dedup relation
+### Step 2 – Create Silver table
 
 ```sql
-WITH deduped_events AS (
-    SELECT *
-    FROM (
-        SELECT
-            n.*,
-            ROW_NUMBER() OVER (
-                PARTITION BY event_id
-                ORDER BY
-                    payload_version DESC,
-                    ingested_at DESC,
-                    ingest_row_id DESC
-            ) AS rn
-        FROM network_events n
-    ) x
-    WHERE rn = 1
-)
+CREATE OR REPLACE TABLE silver_network_events
+USING DELTA
+AS
 SELECT
-    tower_id,
-    SUM(CASE WHEN event_type = 'call_drop' THEN 1 ELSE 0 END)::numeric
-    / NULLIF(
-        SUM(CASE WHEN event_type IN ('call_drop','call_end') THEN 1 ELSE 0 END),
-        0
-      ) AS drop_rate
-FROM deduped_events
-GROUP BY tower_id;
+  ingest_row_id,
+  event_id,
+  tower_id,
+  customer_id,
+  event_type,
+  event_ts,
+  ingested_at,
+  signal_dbm,
+  duration_seconds,
+  payload_version
+FROM network_events
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY event_id
+  ORDER BY payload_version DESC, ingested_at DESC, ingest_row_id DESC
+) = 1;
 ```
 
 ### Step 3 – Validate
 
 ```sql
-WITH deduped_events AS (...)
-SELECT event_id, COUNT(*)
-FROM deduped_events
+SELECT event_id, COUNT(*) AS n
+FROM silver_network_events
 GROUP BY event_id
 HAVING COUNT(*) > 1;
 ```
 
 Expected: 0 rows.
 
-Compare:
+### Step 4 – Calculate KPI only after canonicalization
 
-```text
-raw event rows
-raw distinct event_id
-clean event rows
+```sql
+SELECT
+  tower_id,
+  count_if(event_type = 'call_drop') AS drops,
+  count_if(event_type IN ('call_drop','call_end')) AS total_calls,
+  CAST(count_if(event_type = 'call_drop') AS DOUBLE)
+    / NULLIF(count_if(event_type IN ('call_drop','call_end')), 0) AS drop_rate
+FROM silver_network_events
+GROUP BY tower_id;
 ```
-
-Clean rows should equal expected unique business events under the contract.
 
 ---
 
-## 5. Hands-on lab
+## 6. Hands-on lab
 
-Tạo `lesson-07.sql`.
+### Part A – Dedup / latest
 
-### Part A – Dedup
+1. List duplicate `event_id` + version counts.
+2. Dedup by ingestion time only.
+3. Dedup by official lab contract using `QUALIFY`.
+4. Compare winners for `e005` / `e009`.
+5. Add >=3 validation checks.
+6. Compare tower drop-rate before vs after dedup.
 
-1. Liệt kê duplicate `event_id` và số versions.
-2. Dedup theo latest `ingested_at` only.
-3. Dedup theo `payload_version DESC, ingested_at DESC`.
-4. So sánh winner của `e005` và `e009`.
-5. Viết 3 validation checks cho dedup output.
-6. Tính drop rate trước/sau dedup và giải thích chênh lệch.
+### Part B – Incremental state
 
-### Part B – Latest snapshot
-
-1. Latest customer status/customer.
-2. Latest subscription/customer.
-3. Kiểm tra relation output unique theo customer.
-4. Join latest status với customer revenue mà không fan-out.
-
-### Part C – Incremental extraction
-
-Giả sử:
+Given:
 
 ```text
-last_watermark = 2026-08-03 00:00:00
-current_upper_bound = 2026-08-06 00:00:00
+last_watermark = 2026-08-03 00:00
+upper_bound    = 2026-08-06 00:00
 ```
 
-1. Trích billing rows trong interval `(last, upper]` hoặc `[last, upper)` theo convention bạn chọn.
-2. Viết comment giải thích boundary.
-3. Mô phỏng retry: chạy query hai lần. Nếu append target hai lần thì lỗi gì?
-4. Thiết kế target upsert key.
-5. Mô tả cách bắt late update có `updated_at` cũ hơn watermark.
-6. Mô tả vì sao watermark có thể miss delete.
+7. Write candidate extraction.
+8. Explain retry after target write but before watermark commit.
+9. Add 2-hour overlap and explain target requirement.
+10. Explain why hard deletes can be missed.
 
-### Part D – SCD reasoning
+### Part C – Delta MERGE
 
-Thiết kế table:
+11. Create `customer_current` Delta table.
+12. Create temporary/update relation with:
 
 ```text
-dim_customer_segment_history
+one existing customer update
+one new customer
 ```
 
-có:
+13. MERGE update + insert.
+14. Re-run the same MERGE and prove target does not gain duplicate business keys.
+15. Create deliberately duplicated source rows for one customer; explain why pre-dedup is required.
+16. Fix source using `QUALIFY ROW_NUMBER()` before MERGE.
 
-- surrogate key;
-- business key;
-- segment;
-- effective_from;
-- effective_to;
-- is_current.
+### Part D – SCD / CDC awareness
 
-Viết pseudo-SQL hoặc SQL transaction cho update khi customer 1001 đổi `mass → premium` lúc `2026-08-10 12:00`.
+17. Design SCD2 schema for customer segment.
+18. Write point-in-time join condition.
+19. Describe manual steps to close old version + insert new version.
+20. Write a short comparison:
 
-Sau đó viết point-in-time join từ `billing_transactions.transaction_ts` vào dimension.
+```text
+manual MERGE/SCD2
+vs
+Lakeflow AUTO CDC
+```
+
+including keys, sequencing and out-of-order change concerns.
 
 ### Part E – Data quality
 
-Viết ít nhất 8 checks:
+Write >=8 checks:
 
-- duplicate key;
+- duplicate business key;
 - required NULL;
-- orphan FK;
-- invalid status;
+- malformed/invalid status;
 - negative amount;
-- event `ingested_at < event_ts`;
-- impossible subscription dates;
-- reconciliation successful revenue.
-
-### Challenge – Idempotent daily load
-
-Mô tả một design cho bảng:
-
-```text
-gold_daily_revenue
-Grain: revenue_date / province
-```
-
-Nếu job ngày `2026-08-05` fail sau khi ghi một phần rồi retry, làm sao tránh duplicate/partial output?
-
-Đưa ra ít nhất 2 strategies và trade-off.
+- orphan customer;
+- impossible time order;
+- SCD overlapping windows;
+- revenue reconciliation.
 
 ---
 
-## 6. Knowledge check – MCQ
+## 7. Knowledge check – MCQ
 
-**Q1.** Dedup cần gì trước tiên?  
-A. DISTINCT; B. định nghĩa business key và winner/tie-breaker; C. index; D. LIMIT.
+**Q1.** Dedup bắt đầu bằng:  
+A. DISTINCT; B. business key + winner rule; C. MERGE; D. Photon.
 
-**Q2.** “Latest row” chỉ dựa `MAX(ingested_at)` có thể sai vì:  
-A. latest business semantics có thể theo effective/source version khác ingestion; B. timestamp không sort; C. SQL không có MAX; D. row_number lỗi.
+**Q2.** Databricks `QUALIFY` hữu ích cho dedup vì:  
+A. filter ROW_NUMBER result trực tiếp; B. creates index; C. rewrites Delta log; D. deletes duplicates physically.
 
-**Q3.** Watermark incremental load là một dạng:  
-A. state management; B. encryption; C. indexing; D. schema normalization.
+**Q3.** Multiple source rows match same target row in MERGE:  
+A. always deterministic; B. can make update semantics ambiguous/error, source should be deduped; C. auto SCD2; D. ignored.
 
-**Q4.** Retry một plain append incremental batch có thể:  
-A. tạo duplicate; B. tự rollback lịch sử; C. tạo index; D. không ảnh hưởng.
+**Q4.** Watermark incremental pattern là:  
+A. stateful; B. file format; C. join hint; D. catalog.
 
-**Q5.** SCD Type 2 dùng để:  
-A. giữ history versions; B. chỉ giữ current; C. dedup Kafka; D. sort file.
+**Q5.** Plain append retry có thể:  
+A. create duplicates; B. enable Photon; C. delete history; D. collect stats.
 
-**Q6.** Watermark dựa update timestamp thường không tự capture:  
-A. hard delete không có delete signal; B. inserts; C. rows có timestamp; D. select.
+**Q6.** SCD Type 2:  
+A. stores history versions; B. current only; C. no business key; D. only streaming.
 
----
+**Q7.** AUTO CDC primarily helps with:  
+A. change sequencing/SCD application in Lakeflow pipelines; B. B-tree index; C. SELECT aliases; D. CSV compression.
 
-## 7. Knowledge check – Tự luận / Interview
-
-1. “Duplicate” có những nghĩa nào trong event pipeline?
-2. Tại sao ingestion time và event time không thay thế nhau?
-3. Thiết kế tie-breaker tốt cho dedup cần data contract gì?
-4. Watermark incremental có failure modes nào?
-5. Idempotency khác dedup như thế nào?
-6. SCD Type 1 vs Type 2: chọn dựa trên requirement gì?
-7. Temporal join vào SCD2 dùng điều kiện nào?
-8. Nếu job fail sau target write nhưng trước watermark commit thì điều gì xảy ra khi retry?
-9. Tại sao overlap window + upsert là một strategy thực dụng?
-10. Viết 5 SQL checks bạn muốn chạy trước khi publish Gold table.
+**Q8.** Simple watermark usually cannot infer:  
+A. hard delete without delete signal; B. inserted row with timestamp; C. SELECT result; D. COUNT.
 
 ---
 
-## 8. Exit criteria
+## 8. Tự luận / Interview
 
-- [ ] Dedup network events bằng rule deterministic.
-- [ ] Chứng minh output unique theo business key.
-- [ ] Giải thích latest theo event/effective/ingestion time.
-- [ ] Thiết kế incremental boundaries + retry strategy.
-- [ ] Giải thích watermark miss delete/late update.
-- [ ] Mô tả được SCD1/SCD2 và point-in-time join.
-- [ ] Viết >=8 data-quality SQL checks.
-- [ ] Đạt ít nhất 5/6 MCQ.
+1. Exact duplicate vs business duplicate vs versioned correction.
+2. Vì sao source của MERGE nên unique theo match key?
+3. MERGE có làm pipeline automatically idempotent trong mọi trường hợp không? Vì sao?
+4. Watermark có những failure modes nào?
+5. Overlap window đổi complexity nào lấy reliability nào?
+6. SCD1 vs SCD2 chọn theo requirement gì?
+7. Manual MERGE vs AUTO CDC: khi nào bạn prefer mỗi approach?
+8. AUTO CDC vẫn cần business contract gì?
+9. Nếu fail sau MERGE nhưng trước checkpoint commit, retry sẽ thế nào?
+10. 5 checks trước khi publish Gold table.
+
+---
+
+## 9. Exit criteria
+
+- [ ] Dedup bằng QUALIFY có deterministic rule.
+- [ ] Validate Silver relation unique business key.
+- [ ] Viết incremental interval + retry reasoning.
+- [ ] Thực hiện Delta MERGE update/insert.
+- [ ] Pre-dedup MERGE source khi necessary.
+- [ ] Giải thích delete limitation của watermark.
+- [ ] Giải thích SCD1/SCD2 + point-in-time join.
+- [ ] Phân biệt manual MERGE và AUTO CDC.
+- [ ] Viết >=8 quality checks.
+- [ ] Đạt >=7/8 MCQ.

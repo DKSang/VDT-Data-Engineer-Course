@@ -51,7 +51,7 @@ Tên sản phẩm/feature trong lesson phải ưu tiên terminology hiện hành
 | Module | Chủ đề | Trạng thái |
 |---|---|---|
 | 01 | Data Engineering Foundations & System Thinking | ✅ Complete – source audit started |
-| 02 | SQL for Data Engineers | ✅ Complete – Databricks SQL primary reference |
+| 02 | SQL for Data Engineers | ✅ Complete – Databricks SQL + Delta + Query Profile |
 | 03 | Python for Data Engineers | ✅ Complete – Databricks Academy Python backbone |
 | 04 | DSA for Data Engineer Interviews | ⏳ Planned |
 | 05 | Database Fundamentals | ⏳ Planned |
@@ -88,18 +88,21 @@ Official Databricks alignment: Data Engineering concepts, Lakehouse Architecture
 
 ### Module 02 – SQL for Data Engineers
 
-- Relational thinking, grain & logical query processing
-- NULL, filtering, CASE & data types
-- Aggregation, GROUP BY & HAVING
-- JOINs, cardinality & set operations
-- Subqueries, CTEs & EXISTS
-- Window functions
-- DE SQL patterns: dedup, latest row, incremental, SCD, quality checks
-- Indexes, EXPLAIN & query performance
-- PostgreSQL telecom lab + 30-question practice set
-- Final Assessment + Suggested Solutions
+**Primary environment:** Databricks SQL / Databricks Runtime + Delta tables.
 
-**Primary SQL reference:** Databricks SQL Language Reference. PostgreSQL remains the local lab engine; PostgreSQL documentation is supplementary for engine-specific planner/index behavior.
+- Relational thinking, grain & Databricks query semantics
+- NULL semantics, type rules, `CAST` / `try_cast`
+- Aggregation with `CASE`, aggregate `FILTER`, `count_if`
+- INNER/OUTER/LEFT SEMI/LEFT ANTI joins + cardinality
+- CTEs, subqueries, `EXISTS` and recursive-CTE awareness
+- Window functions + Databricks `QUALIFY`
+- Dedup/latest/incremental patterns on Delta
+- Delta `MERGE INTO` + source pre-dedup + AUTO CDC awareness
+- `EXPLAIN`, Query Profile, exploding joins, shuffle, statistics, AQE and Photon awareness
+- Databricks Delta telecom lab + 35-question practice set
+- Final Assessment 100 points + Suggested Solutions
+
+PostgreSQL setup remains in the repo only as **optional local SQL practice**. PostgreSQL B-tree/index tuning is no longer part of Module 02 pass criteria.
 
 ➡️ [`docs/module-02-sql-for-data-engineers`](docs/module-02-sql-for-data-engineers/README.md)
 
@@ -150,7 +153,7 @@ Operational DB / APIs / Network Events
 
 Ở các module Databricks, architecture trên sẽ được hiện thực bằng các primitive hiện hành như Delta Lake, Lakeflow Connect, Structured Streaming, Lakeflow Spark Declarative Pipelines, Lakeflow Jobs và Unity Catalog khi phù hợp.
 
-Module 02 đưa case study vào PostgreSQL với các bảng customer, subscription, billing, network event và status history.
+Module 02 dùng cùng telecom domain trên **Delta tables** để luyện SQL semantics, dedup, MERGE và query-performance reasoning. PostgreSQL copy chỉ là local fallback.
 
 Module 03 đưa cùng domain sang Python local/bounded processing với dirty CSV/JSONL, explicit data contracts, quarantine, deterministic dedup, unit testing và Databricks development mapping. Mục tiêu là chứng minh business semantics trước khi scale bằng Spark.
 
